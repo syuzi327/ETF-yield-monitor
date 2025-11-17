@@ -1,42 +1,66 @@
 """
-ETF配当利回り監視Bot（円建て）
+ETF配当利回り監視Bot（円建て）- 最終版
+
+ロジック:
+- 閾値 = baseline_yield + threshold_offset（年度内固定）
+- TTM方式で毎日の利回りを取得（信頼性が高い）
+- 年越し初回実行時のみ前年実績を計算してbaseline更新
+- 欠落期間がある場合は過去データを自動補完
 """
 
 import os
+import sys
 import json
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
-from config import ETFS, REMINDER_INTERVAL_DAYS, STATE_FILE, AVERAGE_TRADING_DAYS_PER_YEAR
+
+# スクリプトのディレクトリをパスに追加
+script_dir = Path(__file__).parent
+sys.path.insert(0, str(script_dir))
+
+from config import ETFS, REMINDER_INTERVAL_DAYS, STATE_FILE
 
 
 def get_etf_data(ticker):
-    """ETFの配当利回りと価格を取得"""
+    """ETFの配当利回りと価格を取得（TTM方式 - 信頼性高）"""
     try:
         etf = yf.Ticker(ticker)
-        info = etf.info
         
-        # 配当利回り（%）
-        dividend_yield = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0
+        # historyから価格を取得
+        history = etf.history(period="5d")
         
-        # 現在価格（USD）
-        current_price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        if history.empty:
+            print(f"{ticker} 履歴データなし")
+            return None
         
-        # 配当額（USD）
-        dividend_rate = info.get("dividendRate", 0)
+        # 最新の価格
+        current_price = history["Close"].iloc[-1]
+        last_trade_date = history.index[-1].date().isoformat()
         
-        # 最新の価格データの日付を取得（取引日判定用）
-        history = etf.history(period="1d")
-        if not history.empty:
-            last_trade_date = history.index[-1].date().isoformat()
-        else:
-            last_trade_date = None
+        # 配当情報を取得（TTM方式）
+        try:
+            dividends = etf.dividends
+            if not dividends.empty:
+                # 過去1年（365日）の配当合計 = TTM配当
+                one_year_ago = history.index[-1] - timedelta(days=365)
+                recent_dividends = dividends[dividends.index > one_year_ago]
+                annual_dividend = recent_dividends.sum()
+                dividend_yield = (annual_dividend / current_price) * 100
+            else:
+                # 配当データがない場合はinfoから取得（fallback）
+                info = etf.info
+                dividend_yield = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0
+                annual_dividend = info.get("dividendRate", 0)
+        except:
+            dividend_yield = 0
+            annual_dividend = 0
         
         return {
             "yield": round(dividend_yield, 2),
             "price_usd": round(current_price, 2),
-            "dividend_usd": round(dividend_rate, 2),
+            "dividend_usd": round(annual_dividend, 2),
             "last_trade_date": last_trade_date,
         }
     except Exception as e:
@@ -44,282 +68,274 @@ def get_etf_data(ticker):
         return None
 
 
-def get_year_to_date_average(ticker, year, start_date=None):
+def get_current_threshold(ticker, config, state):
     """
-    年初来（または指定期間）の平均配当利回りを取得
+    現在の閾値を取得（baselineから計算）
+    
+    Returns:
+        dict: threshold情報
+    """
+    threshold_offset = config["threshold_offset"]
+    
+    # state.jsonからbaselineを取得
+    if ticker in state and "baseline" in state[ticker]:
+        baseline_years = state[ticker]["baseline"]["years"]
+        baseline_yield = state[ticker]["baseline"]["yield"]
+        print(f"  📊 Baseline読み込み: {baseline_yield:.2f}% ({baseline_years}年)")
+    else:
+        # 初回はconfigから取得
+        baseline_years = config["baseline_years"]
+        baseline_yield = config["baseline_yield"]
+        print(f"  🆕 初回実行: Baseline = {baseline_yield:.2f}% ({baseline_years}年)")
+    
+    # 閾値 = baseline + offset
+    threshold = baseline_yield + threshold_offset
+    
+    return {
+        "threshold": round(threshold, 2),
+        "baseline_years": baseline_years,
+        "baseline_yield": round(baseline_yield, 2),
+    }
+
+
+def should_update_baseline(ticker, state):
+    """
+    baselineを更新すべきか判定（年度更新時のみTrue）
+    
+    Returns:
+        tuple: (should_update: bool, last_year: int)
+    """
+    from datetime import datetime
+    
+    current_year = datetime.now().year
+    
+    if ticker not in state or "last_year" not in state[ticker]:
+        # 初回実行 or 旧形式のstate → 今年の年を記録するのみ
+        return False, None
+    
+    last_year = state[ticker]["last_year"]
+    
+    # 年が変わっている場合
+    if last_year < current_year:
+        return True, last_year
+    
+    return False, None
+
+
+def get_year_average_from_history(ticker, year):
+    """
+    過去の年度の平均利回りを取得（年度更新時・欠落データ補完用）
+    
+    計算方法: その年の分配金総額 ÷ 年末の株価
     
     Args:
         ticker: ETFティッカーシンボル
         year: 対象年
-        start_date: 開始日（指定しない場合は年初から）
+    
+    Returns:
+        float or None: 年間平均利回り
     """
     try:
         from datetime import datetime
         
         etf = yf.Ticker(ticker)
         
-        if start_date:
-            start = start_date
-        else:
-            start = f"{year}-01-01"
+        start = f"{year}-01-01"
+        end = f"{year}-12-31"
         
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        
-        print(f"  📊 {year}年のデータを取得中... ({start} ～ {end_date})")
+        print(f"    📊 {year}年のデータを取得中... ({start} ～ {end})")
         
         # 履歴データ取得
-        history = etf.history(start=start, end=end_date)
+        history = etf.history(start=start, end=end)
         
         if history.empty:
-            print(f"  ⚠️ データ取得失敗、当日の利回りを使用")
+            print(f"    ⚠️ 履歴データ取得失敗")
             return None
         
-        # 配当利回りを計算（配当額 / 株価）
-        info = etf.info
-        current_dividend = info.get("dividendRate", 0)
+        # 年末の株価を取得
+        year_end_price = history["Close"].iloc[-1]
         
-        if current_dividend > 0:
-            # 各日の株価に対する配当利回りを計算
-            yields = (current_dividend / history["Close"]) * 100
-            avg_yield = yields.mean()
-            trading_days = len(history)
-            
-            print(f"  ✅ 取得完了: 平均利回り {avg_yield:.2f}%, 取引日数 {trading_days}日")
-            return {
-                "avg_yield": round(avg_yield, 2),
-                "trading_days": trading_days
-            }
-        else:
-            print(f"  ⚠️ 配当データなし、当日の利回りを使用")
+        # その年の分配金総額を取得
+        try:
+            dividends = etf.dividends
+            if not dividends.empty:
+                # その年の配当を取得
+                year_dividends = dividends[(dividends.index >= start) & (dividends.index <= end)]
+                
+                if not year_dividends.empty:
+                    # 年間分配金総額
+                    annual_dividend = year_dividends.sum()
+                    
+                    # 利回り = 年間分配金総額 ÷ 年末株価
+                    dividend_yield = (annual_dividend / year_end_price) * 100
+                    
+                    print(f"    ✅ {year}年: 分配金 ${annual_dividend:.2f}, 年末株価 ${year_end_price:.2f}, 利回り {dividend_yield:.2f}%")
+                    return round(dividend_yield, 2)
+                else:
+                    print(f"    ⚠️ {year}年: 分配金データなし")
+                    return None
+        except Exception as e:
+            print(f"    ⚠️ {year}年: 分配金データ取得エラー: {e}")
             return None
+        
+        print(f"    ⚠️ {year}年: 配当データ不足")
+        return None
             
     except Exception as e:
-        print(f"  ⚠️ データ取得エラー: {e}")
+        print(f"    ⚠️ {year}年: データ取得エラー: {e}")
         return None
 
 
-def backfill_missing_years(ticker, last_year, current_year, baseline_years, baseline_yield):
+def update_baseline(ticker, last_year, state, config):
     """
-    欠落した年度のデータを遡って補完
+    baselineを更新（年度更新時に前年の実績を反映）
     
     Args:
-        ticker: ETFティッカーシンボル
-        last_year: 最後に記録された年
-        current_year: 現在の年
-        baseline_years: 現在のbaseline年数
-        baseline_yield: 現在のbaseline利回り
+        ticker: ETFティッカー
+        last_year: 前年の年度
+        state: 現在の状態
+        config: 設定
     
     Returns:
-        dict: 更新後のbaseline情報
-    """
-    print(f"  🔄 欠落データの補完を開始...")
-    
-    updated_baseline_years = baseline_years
-    updated_baseline_yield = baseline_yield
-    
-    # 欠落した年を順番に処理
-    for year in range(last_year + 1, current_year):
-        print(f"  📅 {year}年のデータを補完中...")
-        
-        ytd_data = get_year_to_date_average(ticker, year)
-        
-        if ytd_data:
-            year_avg = ytd_data["avg_yield"]
-            # baselineを更新
-            updated_baseline_yield = (updated_baseline_yield * updated_baseline_years + year_avg) / (updated_baseline_years + 1)
-            updated_baseline_years += 1
-            print(f"  ✅ {year}年: 平均 {year_avg:.2f}% → Baseline更新: {updated_baseline_yield:.2f}% ({updated_baseline_years}年)")
-        else:
-            print(f"  ⚠️ {year}年: データ取得失敗 - スキップ")
-    
-    return {
-        "years": updated_baseline_years,
-        "yield": round(updated_baseline_yield, 2)
-    }
-
-
-def calculate_dynamic_threshold(ticker, current_yield, etf_data, config, state):
-    """
-    加重平均方式で動的閾値を計算
-    
-    計算式:
-    1. 今年の平均 = (前回平均 × 経過日数 + 今日の利回り) / (経過日数 + 1)
-    2. 累積平均 = (baseline_yield × baseline_years + 今年の平均) / (baseline_years + 1)
-    3. 閾値 = 累積平均 + offset
+        dict: 更新後のbaseline情報（失敗時はNone）
     """
     from datetime import datetime
     
-    today = datetime.now().date()
-    current_year = config["current_year"]
-    threshold_offset = config["threshold_offset"]
-    last_trade_date = etf_data.get("last_trade_date")
+    current_year = datetime.now().year
     
-    # state.jsonからbaselineを取得（更新済みの値を優先）
+    # 現在のbaselineを取得
     if ticker in state and "baseline" in state[ticker]:
         baseline_years = state[ticker]["baseline"]["years"]
         baseline_yield = state[ticker]["baseline"]["yield"]
     else:
-        # 初回はconfigから取得
         baseline_years = config["baseline_years"]
         baseline_yield = config["baseline_yield"]
     
-    # state.jsonから今年のデータを取得
-    if ticker in state and "year_data" in state[ticker]:
-        year_data = state[ticker]["year_data"]
-        year_avg = year_data.get("year_avg", current_yield)
-        year_days = year_data.get("year_days", 0)
-        tracked_year = year_data.get("year", current_year)
-        last_update_date = state[ticker].get("last_trade_date")
+    old_baseline = {
+        "years": baseline_years,
+        "yield": baseline_yield
+    }
+    
+    # 前年の実績を計算（常に実データから取得）
+    print(f"  📅 前年({last_year}年)の実績を計算中...")
+    last_year_avg = get_year_average_from_history(ticker, last_year)
+    
+    if not last_year_avg:
+        print(f"  ⚠️ 前年データ取得失敗 - baseline更新をスキップ")
         
-        # 取引日チェック: 前回と同じ日付なら更新しない（土日・祝日対策）
-        if last_trade_date and last_trade_date == last_update_date:
-            print(f"  💤 取引なし（前回: {last_update_date}）- データ更新スキップ")
-            # 取引日数ベースで累積平均計算
-            baseline_days = baseline_years * AVERAGE_TRADING_DAYS_PER_YEAR
-            total_days = baseline_days + year_days
-            cumulative_avg = (baseline_yield * baseline_days + year_avg * year_days) / total_days
-            return {
-                "threshold": round(cumulative_avg + threshold_offset, 2),
-                "cumulative_avg": round(cumulative_avg, 2),
-                "year_avg": round(year_avg, 2),
-                "year_days": year_days,
-                "year": current_year,
-                "baseline_years": baseline_years,
-                "baseline_yield": baseline_yield,
-                "updated": False,
-            }
+        # エラー通知を送信
+        error_embed = create_discord_embed(
+            "error_baseline",
+            ticker,
+            None,  # etf_dataなし
+            0,     # exchange_rateなし
+            0,     # thresholdなし
+            f"{last_year}年の実績データ取得に失敗したため、Baselineの自動更新をスキップしました。現在のBaselineで監視を続行します。",
+            baseline_data=old_baseline
+        )
+        send_discord_notification(error_embed)
         
-        # 年が変わった場合（複数年飛ばした場合も対応）
-        if tracked_year < current_year:
-            years_gap = current_year - tracked_year
-            print(f"  🎊 新年度移行: {tracked_year} → {current_year} ({years_gap}年分)")
+        return None  # 更新失敗を示す
+    
+    # 前年のデータでbaselineを更新
+    new_baseline_yield = (baseline_yield * baseline_years + last_year_avg) / (baseline_years + 1)
+    new_baseline_years = baseline_years + 1
+    
+    print(f"  📈 Baseline更新: {baseline_yield:.2f}% ({baseline_years}年) → {new_baseline_yield:.2f}% ({new_baseline_years}年)")
+    print(f"     {last_year}年実績: {last_year_avg:.2f}% を反映")
+    
+    # 複数年飛ばした場合は欠落データを補完
+    years_gap = current_year - last_year
+    if years_gap > 1:
+        print(f"  ⚠️ {years_gap - 1}年分のデータが欠落 → 自動補完を試行")
+        
+        # 欠落した年を順番に処理
+        for year in range(last_year + 1, current_year):
+            print(f"  📅 {year}年のデータを補完中...")
             
-            # 前年のデータで baseline を更新
-            new_baseline_yield = (baseline_yield * baseline_years + year_avg) / (baseline_years + 1)
-            new_baseline_years = baseline_years + 1
+            year_avg = get_year_average_from_history(ticker, year)
             
-            print(f"  📊 {tracked_year}年で更新: {baseline_yield:.2f}% ({baseline_years}年) → {new_baseline_yield:.2f}% ({new_baseline_years}年)")
-            
-            baseline_years = new_baseline_years
-            baseline_yield = new_baseline_yield
-            
-            # 複数年飛ばした場合は欠落データを補完
-            if years_gap > 1:
-                print(f"  ⚠️ {years_gap - 1}年分のデータが欠落 → 自動補完を試行")
-                backfilled = backfill_missing_years(ticker, tracked_year, current_year, baseline_years, baseline_yield)
-                baseline_years = backfilled["years"]
-                baseline_yield = backfilled["yield"]
-            
-            # 新年度の年初来データを取得
-            ytd_data = get_year_to_date_average(ticker, current_year)
-            if ytd_data:
-                year_avg = ytd_data["avg_yield"]
-                year_days = ytd_data["trading_days"]
+            if year_avg:
+                # baselineを更新
+                new_baseline_yield = (new_baseline_yield * new_baseline_years + year_avg) / (new_baseline_years + 1)
+                new_baseline_years += 1
+                print(f"    ✅ {year}年: {year_avg:.2f}% → Baseline更新: {new_baseline_yield:.2f}% ({new_baseline_years}年)")
             else:
-                year_avg = current_yield
-                year_days = 1
-        else:
-            # 同じ年内での更新
-            # 欠落期間チェック（年度途中で長期間停止していた場合）
-            if year_days > 0:
-                # 前回のチェック日から今日までの期間を確認
-                from datetime import datetime
-                last_checked = state[ticker].get("last_checked")
-                if last_checked:
-                    last_date = datetime.fromisoformat(last_checked).date()
-                    today_date = datetime.now().date()
-                    days_gap = (today_date - last_date).days
-                    
-                    # 7日以上空いていたら欠落データを補完
-                    if days_gap > 7:
-                        print(f"  ⚠️ {days_gap}日間のデータ欠落を検知 → 補完を試行")
-                        
-                        # 欠落期間のデータを取得
-                        gap_start = (last_date + timedelta(days=1)).isoformat()
-                        gap_data = get_year_to_date_average(ticker, current_year, start_date=gap_start)
-                        
-                        if gap_data:
-                            # 欠落期間の平均と既存の平均を統合
-                            total_days = year_days + gap_data["trading_days"]
-                            year_avg = (year_avg * year_days + gap_data["avg_yield"] * gap_data["trading_days"]) / total_days
-                            year_days = total_days
-                            print(f"  ✅ 補完完了: {gap_data['trading_days']}取引日分を追加")
-            
-            # 今年の平均を更新（加重平均）
-            year_avg = (year_avg * year_days + current_yield) / (year_days + 1)
-            year_days += 1
-    else:
-        # 初回実行: 年初来の平均を取得
-        print(f"  🆕 初回実行 - 年初来データを取得します")
-        ytd_data = get_year_to_date_average(ticker, current_year)
-        
-        if ytd_data:
-            year_avg = ytd_data["avg_yield"]
-            year_days = ytd_data["trading_days"]
-        else:
-            # 年初来データ取得失敗時は当日のみ
-            year_avg = current_yield
-            year_days = 1
-    
-    # 累積平均を計算（取引日数ベース）
-    baseline_days = baseline_years * AVERAGE_TRADING_DAYS_PER_YEAR
-    total_days = baseline_days + year_days
-    cumulative_avg = (baseline_yield * baseline_days + year_avg * year_days) / total_days
-    
-    # 動的閾値
-    dynamic_threshold = cumulative_avg + threshold_offset
+                print(f"    ⚠️ {year}年: データ取得失敗 - スキップ")
+                
+                # 欠落年のエラー通知
+                error_embed = create_discord_embed(
+                    "error_baseline",
+                    ticker,
+                    None,
+                    0,
+                    0,
+                    f"欠落データ補完: {year}年の実績データ取得に失敗しました。この年のデータをスキップしてBaseline更新を続行します。",
+                    baseline_data={"years": new_baseline_years, "yield": round(new_baseline_yield, 2)}
+                )
+                send_discord_notification(error_embed)
     
     return {
-        "threshold": round(dynamic_threshold, 2),
-        "cumulative_avg": round(cumulative_avg, 2),
-        "year_avg": round(year_avg, 2),
-        "year_days": year_days,
-        "year": current_year,
-        "baseline_years": baseline_years,  # 更新後の値を返す
-        "baseline_yield": round(baseline_yield, 2),  # 更新後の値を返す
-        "updated": True,
+        "years": new_baseline_years,
+        "yield": round(new_baseline_yield, 2),
+        "old_baseline": old_baseline,  # 成功通知用
+        "last_year": last_year,
+        "last_year_avg": last_year_avg
     }
 
 
 def get_exchange_rate():
-    """USD/JPY為替レートを取得"""
+    """USD/JPY為替レートを取得（複数の方法でフォールバック）"""
+    
+    # 方法1: USDJPY=X で取得
     try:
         usdjpy = yf.Ticker("USDJPY=X")
-        rate = usdjpy.history(period="1d")["Close"].iloc[-1]
-        return round(rate, 2)
+        history = usdjpy.history(period="5d")
+        if not history.empty:
+            rate = history["Close"].iloc[-1]
+            print(f"  為替レート取得成功 (USDJPY=X): ¥{rate:.2f}")
+            return round(rate, 2)
     except Exception as e:
-        print(f"為替レート取得エラー: {e}")
-        return None
-
-
-def get_etf_data(ticker):
-    """ETFの配当利回りと価格を取得"""
+        print(f"  ⚠️ USDJPY=X での取得失敗: {e}")
+    
+    # 方法2: JPY=X で取得（逆数）
     try:
-        etf = yf.Ticker(ticker)
-        info = etf.info
-        
-        # 配当利回り（%）
-        dividend_yield = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0
-        
-        # 現在価格（USD）
-        current_price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-        
-        # 配当額（USD）
-        dividend_rate = info.get("dividendRate", 0)
-        
-        return {
-            "yield": round(dividend_yield, 2),
-            "price_usd": round(current_price, 2),
-            "dividend_usd": round(dividend_rate, 2),
-        }
+        jpyusd = yf.Ticker("JPY=X")
+        history = jpyusd.history(period="5d")
+        if not history.empty:
+            jpy_rate = history["Close"].iloc[-1]
+            rate = 1 / jpy_rate
+            print(f"  為替レート取得成功 (JPY=X): ¥{rate:.2f}")
+            return round(rate, 2)
     except Exception as e:
-        print(f"{ticker} データ取得エラー: {e}")
-        return None
+        print(f"  ⚠️ JPY=X での取得失敗: {e}")
+    
+    # 方法3: 固定レート（最終手段）
+    print(f"  ⚠️ 為替レート自動取得失敗、固定レートを使用します")
+    default_rate = 150.0
+    try:
+        error_embed = {
+            "title": "❌ 為替レート取得失敗",
+            "description": "USD/JPY および JPY=X の両方の取得に失敗しました。\n処理は固定レート (¥150.0) で続行されます。",
+            "color": 0xFF0000,
+            "timestamp": datetime.now().isoformat(),
+            "footer": {"text": "ETF利回り監視Bot (エラー)"}
+        }
+        send_discord_notification(error_embed)
+        print("  ✅ 為替レート取得失敗をDiscordに通知しました。")
+    except Exception as e:
+        print(f"  ❌ Discordへのエラー通知送信にも失敗: {e}")
+    print(f"  デフォルト為替レート: ¥{default_rate}")
+    return default_rate
 
 
 def load_state():
     """状態ファイルを読み込み（エラー保護付き）"""
-    state_path = Path(STATE_FILE)
+    if not STATE_FILE.startswith('/'):
+        state_path = script_dir.parent / STATE_FILE
+    else:
+        state_path = Path(STATE_FILE)
+    
     if state_path.exists():
         try:
             with open(state_path, "r", encoding="utf-8") as f:
@@ -328,13 +344,11 @@ def load_state():
             print(f"⚠️ state.jsonが壊れています: {e}")
             print(f"   バックアップを作成して初期化します...")
             
-            # 壊れたファイルをバックアップ
             backup_path = state_path.with_suffix(".json.backup")
             import shutil
             shutil.copy(state_path, backup_path)
             print(f"   バックアップ: {backup_path}")
             
-            # 空の状態で初期化
             return {}
         except Exception as e:
             print(f"⚠️ state.json読み込みエラー: {e}")
@@ -344,13 +358,17 @@ def load_state():
 
 def save_state(state):
     """状態ファイルを保存"""
-    state_path = Path(STATE_FILE)
+    if not STATE_FILE.startswith('/'):
+        state_path = script_dir.parent / STATE_FILE
+    else:
+        state_path = Path(STATE_FILE)
+    
     state_path.parent.mkdir(parents=True, exist_ok=True)
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def should_notify(ticker, current_yield, threshold, state):
+def should_notify(ticker, current_yield, threshold, state, etf_data):
     """
     通知すべきかを判定
     
@@ -358,6 +376,7 @@ def should_notify(ticker, current_yield, threshold, state):
         tuple: (should_notify: bool, notification_type: str, reason: str)
     """
     today = datetime.now().date().isoformat()
+    last_trade_date = etf_data.get("last_trade_date")
     
     # 初回実行
     if ticker not in state:
@@ -366,36 +385,22 @@ def should_notify(ticker, current_yield, threshold, state):
     prev_state = state[ticker]
     prev_status = prev_state.get("status", "below")
     prev_yield = prev_state.get("current_yield", 0)
-    prev_threshold = prev_state.get("threshold", threshold)
     last_notified = prev_state.get("last_notified")
     last_reminded = prev_state.get("last_reminded")
+    last_update_date = prev_state.get("last_trade_date")
     
-    # 閾値変更検知
-    threshold_changed = prev_threshold != threshold
-    
-    if threshold_changed:
-        print(f"⚠️ 閾値変更検知: {prev_threshold}% → {threshold}%")
-        
-        # 閾値変更後の状態を再評価
-        # 前回: below, 今回: above → 上抜け通知
-        if prev_status == "below" and current_yield >= threshold:
-            return True, "crossed_above", f"閾値変更後の上抜け: {current_yield}% (閾値: {prev_threshold}%→{threshold}%)"
-        
-        # 前回: above, 今回: below → 下抜け通知
-        if prev_status == "above" and current_yield < threshold:
-            return True, "crossed_below", f"閾値変更後の下抜け: {current_yield}% (閾値: {prev_threshold}%→{threshold}%)"
-        
-        # 両方above or 両方below → 状態維持、通知なし
-        # ただし、aboveのままなら次回週次リマインダーがリセットされる
-        return False, "threshold_changed", f"閾値変更（状態維持）: {prev_threshold}%→{threshold}%"
+    # 取引日チェック: 前回と同じ日付なら更新しない（土日・祝日対策）
+    if last_trade_date and last_trade_date == last_update_date:
+        print(f"  💤 取引なし（前回: {last_update_date}）- 通知判定スキップ")
+        return False, "no_trade", "取引日なし"
     
     # 通常の上抜け検知
     if prev_status == "below" and current_yield >= threshold:
-        return True, "crossed_above", f"閾値上抜け: {prev_yield}% → {current_yield}%"
+        return True, "crossed_above", f"閾値上抜け: {prev_yield:.2f}% → {current_yield:.2f}%"
     
     # 通常の下抜け検知
     if prev_status == "above" and current_yield < threshold:
-        return True, "crossed_below", f"閾値下抜け: {prev_yield}% → {current_yield}%"
+        return True, "crossed_below", f"閾値下抜け: {prev_yield:.2f}% → {current_yield:.2f}%"
     
     # 閾値超過中の週次リマインダー
     if prev_status == "above" and current_yield >= threshold:
@@ -409,14 +414,18 @@ def should_notify(ticker, current_yield, threshold, state):
     return False, None, "通知不要"
 
 
-def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, threshold, reason):
+def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, threshold, reason, baseline_data=None, old_baseline=None):
     """Discord埋め込みメッセージを作成"""
     
     # 色の設定
     color_map = {
-        "crossed_above": 0x00FF00,  # 緑（上抜け）
-        "crossed_below": 0xFF0000,  # 赤（下抜け）
-        "reminder": 0xFFFF00,       # 黄（リマインダー）
+        "crossed_above": 0x00FF00,      # 緑（上抜け）
+        "crossed_below": 0xFF0000,      # 赤（下抜け）
+        "reminder": 0xFFFF00,           # 黄（リマインダー）
+        "initial": 0x0099FF,            # 青（初回起動）
+        "baseline_updated": 0x9966FF,   # 紫（Baseline更新成功）
+        "error_etf_data": 0xFF0000,     # 赤（ETFデータ取得失敗）
+        "error_baseline": 0xFF9900,     # オレンジ（Baseline更新失敗）
     }
     
     # タイトルの設定
@@ -424,62 +433,140 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
         "crossed_above": "🚀 利回り閾値上抜け！",
         "crossed_below": "📉 利回り閾値下抜け",
         "reminder": "📌 週次リマインダー",
+        "initial": "✅ 監視開始",
+        "baseline_updated": "📊 Baseline自動更新",
+        "error_etf_data": "❌ データ取得失敗",
+        "error_baseline": "❌ Baseline更新失敗",
     }
     
     etf_name = ETFS[ticker]["name"]
+    
+    # エラー通知の場合（etf_dataがNoneの可能性）
+    if notification_type in ["error_etf_data", "error_baseline"]:
+        embed = {
+            "title": f"{title_map[notification_type]} - {ticker}",
+            "description": f"**{etf_name}**",
+            "color": color_map[notification_type],
+            "fields": [
+                {
+                    "name": "📝 詳細",
+                    "value": reason,
+                    "inline": False
+                }
+            ],
+            "timestamp": datetime.now().isoformat(),
+            "footer": {"text": "ETF利回り監視Bot (エラー)"}
+        }
+        
+        # Baseline更新失敗時は追加情報
+        if notification_type == "error_baseline" and baseline_data:
+            embed["fields"].insert(0, {
+                "name": "ℹ️ 現在のBaseline",
+                "value": f"{baseline_data['yield']}% ({baseline_data['years']}年)",
+                "inline": False
+            })
+        
+        return embed
+    
+    # Baseline更新成功通知
+    if notification_type == "baseline_updated":
+        embed = {
+            "title": f"{title_map[notification_type]} - {ticker}",
+            "description": f"**{etf_name}**",
+            "color": color_map[notification_type],
+            "fields": [
+                {
+                    "name": "📈 更新前",
+                    "value": f"{old_baseline['yield']}% ({old_baseline['years']}年)",
+                    "inline": True
+                },
+                {
+                    "name": "📈 更新後",
+                    "value": f"**{baseline_data['yield']}%** ({baseline_data['years']}年)",
+                    "inline": True
+                },
+                {
+                    "name": "🎯 新しい閾値",
+                    "value": f"{threshold}%",
+                    "inline": True
+                },
+                {
+                    "name": "📝 詳細",
+                    "value": reason,
+                    "inline": False
+                }
+            ],
+            "timestamp": datetime.now().isoformat(),
+            "footer": {"text": "ETF利回り監視Bot"}
+        }
+        return embed
+    
+    # 通常の通知（価格情報あり）
     price_jpy = round(etf_data["price_usd"] * exchange_rate, 2)
     dividend_jpy = round(etf_data["dividend_usd"] * exchange_rate, 2)
+    
+    fields = [
+        {
+            "name": "📊 配当利回り (TTM)",
+            "value": f"**{etf_data['yield']}%**",
+            "inline": True
+        },
+        {
+            "name": "🎯 閾値",
+            "value": f"{threshold}%",
+            "inline": True
+        }
+    ]
+    
+    # 初回起動時はBaseline情報を追加
+    if notification_type == "initial" and baseline_data:
+        fields.append({
+            "name": "ℹ️ Baseline",
+            "value": f"{baseline_data['yield']}% ({baseline_data['years']}年)",
+            "inline": True
+        })
+    
+    # 価格情報
+    fields.extend([
+        {
+            "name": "💵 現在価格（USD）",
+            "value": f"${etf_data['price_usd']}",
+            "inline": True
+        },
+        {
+            "name": "💴 現在価格（JPY）",
+            "value": f"¥{price_jpy:,.0f}",
+            "inline": True
+        },
+        {
+            "name": "💰 年間配当（USD）",
+            "value": f"${etf_data['dividend_usd']}",
+            "inline": True
+        },
+        {
+            "name": "💰 年間配当（JPY）",
+            "value": f"¥{dividend_jpy:,.0f}",
+            "inline": True
+        },
+        {
+            "name": "🌐 為替レート",
+            "value": f"1 USD = ¥{exchange_rate}",
+            "inline": False
+        },
+        {
+            "name": "📝 詳細",
+            "value": reason,
+            "inline": False
+        }
+    ])
     
     embed = {
         "title": f"{title_map[notification_type]} - {ticker}",
         "description": f"**{etf_name}**",
         "color": color_map[notification_type],
-        "fields": [
-            {
-                "name": "📊 配当利回り",
-                "value": f"**{etf_data['yield']}%**",
-                "inline": True
-            },
-            {
-                "name": "🎯 閾値",
-                "value": f"{threshold}%",
-                "inline": True
-            },
-            {
-                "name": "💵 現在価格（USD）",
-                "value": f"${etf_data['price_usd']}",
-                "inline": True
-            },
-            {
-                "name": "💴 現在価格（JPY）",
-                "value": f"¥{price_jpy:,.0f}",
-                "inline": True
-            },
-            {
-                "name": "💰 年間配当（USD）",
-                "value": f"${etf_data['dividend_usd']}",
-                "inline": True
-            },
-            {
-                "name": "💰 年間配当（JPY）",
-                "value": f"¥{dividend_jpy:,.0f}",
-                "inline": True
-            },
-            {
-                "name": "🌐 為替レート",
-                "value": f"1 USD = ¥{exchange_rate}",
-                "inline": False
-            },
-            {
-                "name": "📝 詳細",
-                "value": reason,
-                "inline": False
-            }
-        ],
+        "fields": fields,
         "timestamp": datetime.now().isoformat(),
-        "footer": {
-            "text": "ETF利回り監視Bot"
-        }
+        "footer": {"text": "ETF利回り監視Bot"}
     }
     
     return embed
@@ -493,9 +580,7 @@ def send_discord_notification(embed):
         print("⚠️ DISCORD_WEBHOOK_URL が設定されていません")
         return False
     
-    payload = {
-        "embeds": [embed]
-    }
+    payload = {"embeds": [embed]}
     
     try:
         response = requests.post(webhook_url, json=payload)
@@ -513,11 +598,7 @@ def main():
     
     # 為替レート取得
     exchange_rate = get_exchange_rate()
-    if not exchange_rate:
-        print("❌ 為替レート取得失敗。処理を中断します。")
-        return
-    
-    print(f"💱 USD/JPY: ¥{exchange_rate}\n")
+    print(f"\n💱 USD/JPY: ¥{exchange_rate}\n")
     
     # 状態ファイル読み込み
     state = load_state()
@@ -526,49 +607,100 @@ def main():
     for ticker, config in ETFS.items():
         print(f"--- {ticker} ({config['name']}) ---")
         
-        # ETFデータ取得
+        # ETFデータ取得（TTM方式）
         etf_data = get_etf_data(ticker)
         if not etf_data:
             print(f"⚠️ {ticker} のデータ取得失敗\n")
+            
+            # ETFデータ取得失敗の通知
+            error_embed = create_discord_embed(
+                "error_etf_data",
+                ticker,
+                None,
+                0,
+                0,
+                f"{ETFS[ticker]['name']} のデータ取得に失敗しました。yfinance APIの問題、またはティッカーシンボルの変更が考えられます。この銘柄の監視をスキップします。"
+            )
+            send_discord_notification(error_embed)
             continue
         
         current_yield = etf_data["yield"]
         last_trade_date = etf_data.get("last_trade_date")
+        current_year = datetime.now().year
         
-        # 動的閾値を計算
-        threshold_data = calculate_dynamic_threshold(ticker, current_yield, etf_data, config, state)
+        # 年度更新チェック（baselineの自動更新）
+        baseline_update_success = False
+        should_update, last_year = should_update_baseline(ticker, state)
+        if should_update:
+            new_baseline = update_baseline(ticker, last_year, state, config)
+            
+            if new_baseline:
+                # baselineを即座に反映
+                if ticker not in state:
+                    state[ticker] = {}
+                state[ticker]["baseline"] = {
+                    "years": new_baseline["years"],
+                    "yield": new_baseline["yield"]
+                }
+                baseline_update_success = True
+        
+        # 閾値を取得（更新されたbaselineを使用）
+        threshold_data = get_current_threshold(ticker, config, state)
         threshold = threshold_data["threshold"]
-        cumulative_avg = threshold_data["cumulative_avg"]
-        year_avg = threshold_data["year_avg"]
         
-        # データが更新されなかった場合（土日・祝日）
-        if not threshold_data.get("updated", True):
-            print(f"閾値: {threshold}% (前回から変更なし)\n")
-            continue
-        
-        print(f"配当利回り: {current_yield}%")
-        print(f"今年平均: {year_avg}% ({threshold_data['year_days']}取引日)")
-        print(f"累積平均: {cumulative_avg}% (閾値: {threshold}%)")
+        print(f"配当利回り: {current_yield}% (TTM方式)")
+        print(f"閾値: {threshold}% (Baseline: {threshold_data['baseline_yield']}%, {threshold_data['baseline_years']}年)")
         print(f"価格: ${etf_data['price_usd']} (¥{etf_data['price_usd'] * exchange_rate:,.0f})")
+        
+        # Baseline更新成功の通知
+        if baseline_update_success and new_baseline:
+            update_embed = create_discord_embed(
+                "baseline_updated",
+                ticker,
+                etf_data,
+                exchange_rate,
+                threshold,
+                f"{new_baseline['last_year']}年実績 {new_baseline['last_year_avg']:.2f}% を反映してBaselineを更新しました。新しい閾値で監視を続行します。",
+                baseline_data={
+                    "years": new_baseline["years"],
+                    "yield": new_baseline["yield"]
+                },
+                old_baseline=new_baseline["old_baseline"]
+            )
+            send_discord_notification(update_embed)
         
         # 通知判定
         should_send, notification_type, reason = should_notify(
-            ticker, current_yield, threshold, state
+            ticker, current_yield, threshold, state, etf_data
         )
         
         print(f"判定: {reason}")
         
-        if should_send:
-            # Discord通知送信
+        # 初回起動の通知
+        if notification_type == "initial":
+            initial_embed = create_discord_embed(
+                "initial",
+                ticker,
+                etf_data,
+                exchange_rate,
+                threshold,
+                "初回起動。この閾値で監視を開始します。",
+                baseline_data={
+                    "years": threshold_data["baseline_years"],
+                    "yield": threshold_data["baseline_yield"]
+                }
+            )
+            send_discord_notification(initial_embed)
+        elif should_send:
+            # 通常の通知（上抜け・下抜け・リマインダー）
             embed = create_discord_embed(
-                notification_type, ticker, etf_data, exchange_rate, threshold, reason
+                notification_type, ticker, etf_data, exchange_rate, 
+                threshold, reason
             )
             send_discord_notification(embed)
         
         # 状態更新
         today = datetime.now().date().isoformat()
-        
-        # 現在のステータス判定
         new_status = "above" if current_yield >= threshold else "below"
         
         # 状態オブジェクト作成
@@ -576,16 +708,11 @@ def main():
             "status": new_status,
             "current_yield": current_yield,
             "threshold": threshold,
-            "cumulative_avg": cumulative_avg,
-            "last_trade_date": last_trade_date,  # 取引日を保存
-            "baseline": {  # baseline情報を永続化
+            "last_trade_date": last_trade_date,
+            "last_year": current_year,  # 年度追跡用
+            "baseline": {
                 "years": threshold_data["baseline_years"],
                 "yield": threshold_data["baseline_yield"],
-            },
-            "year_data": {
-                "year": threshold_data["year"],
-                "year_avg": year_avg,
-                "year_days": threshold_data["year_days"],
             },
             "last_checked": today,
         }
@@ -597,8 +724,8 @@ def main():
             new_state["last_reminded"] = prev_state.get("last_reminded")
             new_state["crossed_above_date"] = prev_state.get("crossed_above_date")
         
-        # 通知を送った場合の更新
-        if should_send:
+        # 通知を送った場合の更新（初回起動も含む）
+        if should_send or notification_type == "initial":
             new_state["last_notified"] = today
             
             if notification_type == "crossed_above":
@@ -609,13 +736,6 @@ def main():
             elif notification_type == "crossed_below":
                 new_state["crossed_above_date"] = None
                 new_state["last_reminded"] = None
-        
-        # 閾値変更時の特別処理
-        if notification_type == "threshold_changed":
-            # 閾値が変更されたが通知は不要な場合
-            # above状態が維持される場合は、週次リマインダーをリセット
-            if new_status == "above":
-                new_state["last_reminded"] = today  # 週次カウンターをリセット
         
         state[ticker] = new_state
         print()
