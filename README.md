@@ -1,364 +1,370 @@
-# ETF配当利回り監視Bot（円建て）
+# ETF配当利回り監視Bot
 
-米国高配当ETFの配当利回りを円建てで監視し、**動的閾値**を超えたらDiscordに通知するBot
+米国高配当ETF（VYM, HDV, SPYD, SCHD）の配当利回りを監視し、設定した閾値を超えた際にDiscordへ通知するGitHub Actionsベースの自動監視Bot。
 
-## 📊 監視対象ETF
+## 特徴
 
-- **VYM** - Vanguard High Dividend Yield ETF
-- **HDV** - iShares Core High Dividend ETF
-- **SPYD** - SPDR Portfolio S&P 500 High Dividend ETF
-- **SCHD** - Schwab U.S. Dividend Equity ETF
+### 🎯 シンプルで正確な閾値計算
+- **年度内固定の閾値**: baseline利回り（過去平均）+ オフセットで計算
+- **TTM方式**: 過去365日の実績配当で利回りを計算（信頼性が高い）
+- **初回起動タイミング非依存**: 年の途中で起動しても正確
 
-## 🔔 通知ロジック
+### 🔄 自動Baseline更新
+- **年越し時の自動更新**: 前年実績を自動計算してbaselineに反映
+- **欠落データの自動補完**: 長期停止後も過去データを自動取得して更新
+- **初回起動時の補完対応**: 2027年に初回起動しても2025-2026年のデータを自動補完
 
-1. **上抜け通知**: 配当利回りが動的閾値を超えた瞬間に通知
-2. **週次リマインダー**: 閾値超過が継続している間、週1回通知
-3. **下抜け通知**: 閾値を下回った時に1回通知
+### 📢 充実した通知機能
+- **初回起動通知**: 監視開始時に設定値を確認
+- **閾値上抜け/下抜け通知**: リアルタイムで検知
+- **週次リマインダー**: 閾値超過中は毎週土曜日に通知
+- **Baseline更新通知**: 年度更新の成功を確認
+- **エラー通知**: データ取得失敗やBaseline更新失敗を即座に把握
 
-## 🎯 動的閾値システム
+### 💱 円建て表示
+- USD/JPY為替レートを自動取得
+- 価格と配当を円換算して表示
 
-### 完全自動の閾値更新
+## セットアップ
 
-このBotは**年次メンテナンス不要**の動的閾値システムを採用しています。
-
-#### 計算方式
-
-```python
-# 例: VYM (2025年11月16日時点)
-baseline_years = 18        # 2007-2024年
-baseline_yield = 3.03%     # その期間の平均利回り
-year_2025_avg = 2.95%      # 2025年の平均（毎日更新、取引日数ベース）
-year_2025_days = 220       # 実際の取引日数
-
-# 累積平均を計算（取引日数ベース）
-baseline_days = 18 × 252 = 4,536日
-cumulative_avg = (3.03% × 4536 + 2.95% × 220) / 4756 = 3.02%
-
-# 動的閾値
-threshold = 3.02% + 0.3% = 3.32%
-```
-
-**重要:** 累積平均は取引日数ベースで計算されるため、年初の数日間でも閾値が安定します。
-
-#### 年初の安定性
-
-```python
-# 2026年1月2日（初日のみ）
-baseline_days = 19 × 252 = 4,788日
-year_days = 1
-year_avg = 1.80%  # 暴落した1日
-
-cumulative_avg = (3.03% × 4788 + 1.80% × 1) / 4789 = 3.0297%
-# 変動: わずか0.0003% → 安定 ✅
-```
-
-#### 主な特徴
-
-- ✅ **初回起動時**: 年初来の全データを遡って取得
-- ✅ **毎日実行時**: 取引日のみ更新（土日祝日は自動スキップ）
-- ✅ **年度移行**: 自動で前年データをbaselineに統合
-- ✅ **データ欠落補完**: 長期停止後も自動で欠落期間を補完
-- ✅ **複数年飛び越え**: 2年以上の欠落も遡って補完
-
-### データ補完機能
-
-**年度途中の欠落（7日以上）**
-```
-最終実行: 2025年8月15日
-再起動: 2025年11月16日
-→ 8月16日～11月15日の欠落分を自動補完
-```
-
-**年度を飛び越えた場合**
-```
-最終実行: 2025年12月
-再起動: 2027年5月
-→ 2026年全体を遡って補完 + 2027年1-4月を補完
-```
-
-## 🚀 セットアップ
-
-### 1. Discord Webhookの作成
-
-1. Discordサーバーで右クリック → **サーバー設定**
-2. **連携サービス** → **ウェブフック** → **新しいウェブフック**
-3. 名前を設定（例: ETF利回り監視Bot）
-4. 通知先チャンネルを選択
-5. **ウェブフックURLをコピー**
-
-### 2. GitHubリポジトリの作成
+### 1. リポジトリの準備
 
 ```bash
-# このディレクトリをGitHubにプッシュ
-git init
-git add .
-git commit -m "Initial commit: ETF yield monitor bot"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/etf-yield-monitor.git
-git push -u origin main
+# クローン
+git clone https://github.com/your-username/etf-yield-monitor.git
+cd etf-yield-monitor
+
+# ディレクトリ構造
+etf-yield-monitor/
+├── .github/
+│   └── workflows/
+│       └── monitor.yml
+├── src/
+│   ├── etf_monitor.py
+│   └── config.py
+├── data/
+│   └── state.json  # 自動生成
+├── requirements.txt
+└── README.md
 ```
+
+### 2. Discord Webhook URLの取得
+
+1. Discordサーバーで通知を受け取りたいチャンネルを開く
+2. チャンネル設定 → 連携サービス → ウェブフック
+3. 「新しいウェブフック」を作成
+4. Webhook URLをコピー
 
 ### 3. GitHub Secretsの設定
 
-1. GitHubリポジトリページで **Settings** → **Secrets and variables** → **Actions**
-2. **New repository secret** をクリック
-3. 以下を登録:
-   - **Name**: `DISCORD_WEBHOOK_URL`
-   - **Secret**: （コピーしたWebhook URL）
+1. GitHubリポジトリページで `Settings` → `Secrets and variables` → `Actions`
+2. `New repository secret` をクリック
+3. 以下を追加:
+   - Name: `DISCORD_WEBHOOK_URL`
+   - Value: (コピーしたWebhook URL)
 
-### 4. 初回の状態ファイル作成
+### 4. requirements.txtの作成
 
-```bash
-# dataディレクトリと空のstate.jsonを作成
-mkdir -p data
-echo "{}" > data/state.json
-git add data/state.json
-git commit -m "Add initial state file"
-git push
+```
+yfinance==0.2.66
+requests==2.31.0
 ```
 
-## ⚙️ 設定のカスタマイズ
+### 5. GitHub Actionsの有効化
 
-### 閾値オフセットの変更
+- `.github/workflows/monitor.yml` がリポジトリにあることを確認
+- GitHub Actionsが自動的に有効化されます
+- デフォルトで毎日UTC 21:00（JST 6:00）に実行
 
-`src/config.py` を編集:
+## 設定
+
+### config.py
 
 ```python
 ETFS = {
     "VYM": {
         "name": "Vanguard High Dividend Yield ETF",
-        "baseline_years": 18,
-        "baseline_yield": 3.03,
-        "threshold_offset": 0.3,  # ← ここを変更（%）
-        "current_year": 2025,
+        "inception_date": "2006-11-10",
+        "baseline_years": 18,         # 2007-2024年
+        "baseline_yield": 3.03,       # 過去18年の平均利回り
+        "baseline_year_end": 2024,    # baselineの最終年
+        "threshold_offset": 0.0,      # baseline + 0.0%で通知
     },
-    # ...
 }
 ```
 
-**推奨値:**
-- `0.2-0.3`: 頻繁に通知（少しでも高利回りで通知）
-- `0.4-0.5`: 控えめに通知（明確な買い場のみ）
+**追加説明:**
+```
+- `baseline_year_end`: baselineに含まれる最終年（重要！）
 
-### 実行時刻の変更
+#### パラメータ説明
 
-`.github/workflows/monitor.yml` のcron設定を編集:
+- `baseline_years`: baselineに含まれる年数
+- `baseline_yield`: 過去の平均利回り（%）
+- `threshold_offset`: baseline + この値が閾値になる
+  - `0.0`: baseline以上で通知
+  - `0.5`: baseline + 0.5%以上で通知
+
+### 実行スケジュールの変更
+
+`.github/workflows/monitor.yml` の `cron` を編集:
 
 ```yaml
 schedule:
-  # 米国市場終了後（日本時間朝6:00）に実行する場合
-  - cron: '0 21 * * *'  # UTC 21:00 = JST 6:00
-  
-  # 日本時間23:00に実行する場合
-  - cron: '0 14 * * *'  # UTC 14:00 = JST 23:00
+  # 毎日UTC 21:00（JST 6:00）
+  - cron: '0 21 * * *'
 ```
 
-### 週次リマインダー間隔の変更
+### 手動実行
 
-`src/config.py` を編集:
+GitHub Actionsページで「Run workflow」ボタンをクリック
 
-```python
-# 週次リマインダー間隔（日数）
-REMINDER_INTERVAL_DAYS = 7  # ← ここを変更
+## 動作シナリオ
+
+### シナリオ1: 2025年11月17日に初回起動
+
+```
+1. データ取得: TTM利回り 4.0%
+2. 閾値計算: baseline 3.03% + offset 0.0% = 3.03%
+3. 判定: 4.0% > 3.03% → above
+4. Discord通知: "⚠️ 監視開始（閾値超過中）"
+   - 次回リマインダー: 2025-11-22 (土曜日)
+5. state.json保存:
+   - status: "above"
+   - last_year: 2025
+   - last_reminded: 2025-11-17
 ```
 
-## 🧪 ローカルでのテスト
+### シナリオ2: 2025年12月31日に初回起動
+
+```
+1. データ取得: TTM利回り 2.8%
+2. 閾値計算: 3.03%
+3. 判定: 2.8% < 3.03% → below
+4. Discord通知: "✅ 監視開始"
+5. state.json保存:
+   - status: "below"
+   - last_year: 2025
+```
+
+### シナリオ3: 2026年1月1日（年越し）
+
+```
+1. 年度更新検知: last_year=2025, current_year=2026
+2. 2025年実績を計算:
+   - 2025年分配金総額: $3.35
+   - 2025年12月31日株価: $95.00
+   - 2025年利回り = 3.35 / 95.00 = 3.53%
+3. Baseline更新:
+   - 旧: 3.03% (18年)
+   - 新: (3.03×18 + 3.53) / 19 = 3.06% (19年)
+4. Discord通知: "📊 Baseline自動更新"
+5. 新しい閾値: 3.06%
+```
+
+### シナリオ4: 2027年1月に初回起動（欠落補完）
+
+```
+1. 初回起動検知
+2. config.py: baseline_years=18 → 最終年は2024年
+3. 欠落検知: 2024 < 2027-1 → 2025-2026年が欠落
+4. 自動補完開始:
+   - 2025年データ取得 → baseline更新
+   - 2026年データ取得 → baseline更新
+5. Discord通知: "📊 Baseline自動更新"
+   - 詳細: 初回起動時にデータ欠落を検知し、自動補完
+6. 更新後のbaseline: 20年分（2007-2026年）
+```
+
+### シナリオ5: 土曜日の週次リマインダー
+
+```
+前提: aboveが継続中、last_reminded=2025-11-17
+
+2025年11月23日（土曜日）の実行:
+1. TTM利回り: 4.1%
+2. 閾値: 3.03%
+3. 判定: above継続 & 土曜日 & 7日経過
+4. Discord通知: "📌 週次リマインダー"
+5. last_reminded更新: 2025-11-23
+```
+
+## ロジックの特徴
+
+### 年換算方式の問題を解決
+
+**旧方式の問題:**
+```
+11月に初回起動（3回分配金済み）
+→ 年換算: (3回分 × 365/320日) で推計
+→ 4回目配当前: 過小評価
+→ 年度更新時に不正確なyear_avgを使用
+```
+
+**新方式の解決:**
+```
+11月に初回起動
+→ 年の途中では統計を取らない
+→ 年越し時に実データから計算
+  → 2025年分配金総額 ÷ 12/31株価
+→ 常に正確
+```
+
+### Baselineの自動管理
+
+- **年度更新**: 前年実績を自動計算してbaseline更新
+- **欠落補完**: 長期停止後も過去データを自動取得
+- **初回対応**: 初回起動時も欠落期間を自動検知・補完
+- **state.json**: 更新後のbaselineを永続化
+
+## 通知の種類
+
+### 1. 監視開始（初回起動 - below）
+```
+✅ 監視開始 - VYM
+色: 青
+📊 配当利回り (TTM): 2.49%
+🎯 閾値: 3.03%
+ℹ️ Baseline: 3.03% (18年)
+```
+
+### 2. 監視開始（初回起動 - above）
+```
+⚠️ 監視開始（閾値超過中） - VYM
+色: オレンジ
+📊 配当利回り (TTM): 4.10%
+🎯 閾値: 3.03%
+ℹ️ Baseline: 3.03% (18年)
+📅 次回リマインダー: 2025-11-22 (土曜日)
+```
+
+### 3. 閾値上抜け
+```
+🚀 利回り閾値上抜け！ - VYM
+色: 緑
+詳細: 閾値上抜け: 2.98% → 3.05%
+```
+
+### 4. 閾値下抜け
+```
+📉 利回り閾値下抜け - VYM
+色: 赤
+詳細: 閾値下抜け: 3.05% → 2.98%
+```
+
+### 5. 週次リマインダー
+```
+📌 週次リマインダー - VYM
+色: 黄
+詳細: 週次リマインダー（土曜日、継続14日目）
+```
+
+### 6. Baseline自動更新
+```
+📊 Baseline自動更新 - VYM
+色: 紫
+📈 更新前: 3.03% (18年)
+📈 更新後: 3.08% (19年)
+🎯 新しい閾値: 3.08%
+```
+
+### 7. データ取得失敗
+```
+❌ データ取得失敗 - VYM
+色: 赤
+詳細: yfinance APIの問題、またはティッカーシンボルの変更
+```
+
+### 8. Baseline更新失敗
+```
+❌ Baseline更新失敗 - VYM
+色: オレンジ
+ℹ️ 現在のBaseline: 3.03% (18年)
+詳細: 2025年の実績データ取得に失敗
+```
+
+## トラブルシューティング
+
+### 通知が来ない
+
+1. GitHub Actionsが実行されているか確認
+   - Actionsタブで実行履歴を確認
+2. Discord Webhook URLが正しいか確認
+   - Secretsの設定を確認
+3. エラーログを確認
+   - Actions実行ログで詳細を確認
+
+### データ取得エラー
+
+```
+❌ データ取得失敗
+```
+
+**原因:**
+- yfinance APIの一時的な障害
+- ティッカーシンボルの変更
+- ネットワークエラー
+
+**対処:**
+- 数時間後に自動的に再試行されます
+- 継続する場合はティッカーシンボルを確認
+
+### Baseline更新失敗
+
+```
+❌ Baseline更新失敗
+```
+
+**原因:**
+- 過去データの取得失敗
+- 分配金データの不足
+
+**対処:**
+- 翌年の年越し時に再試行されます
+- 古いbaselineで監視は継続されます
+
+## 開発者向け
+
+### ローカルテスト
 
 ```bash
-# 依存ライブラリのインストール
+# 依存関係インストール
 pip install -r requirements.txt
 
-# 環境変数を設定してテスト実行
-export DISCORD_WEBHOOK_URL="your_webhook_url_here"
+# 環境変数設定
+export DISCORD_WEBHOOK_URL="your_webhook_url"
+
+# 実行
 cd src
 python etf_monitor.py
 ```
 
-### 初回実行時の動作
-
-```
---- VYM (Vanguard High Dividend Yield ETF) ---
-🆕 初回実行 - 年初来データを取得します
-📊 2025年のデータを取得中... (2025-01-01 ～ 2025-11-16)
-✅ 取得完了: 平均利回り 2.95%, 取引日数 220日
-配当利回り: 2.95%
-今年平均: 2.95% (220取引日)
-累積平均: 3.02% (閾値: 3.32%)
-価格: $141.23 (¥21,184)
-判定: 初回実行
-```
-
-## 🎯 手動実行
-
-GitHubリポジトリページで:
-1. **Actions** タブをクリック
-2. **ETF Yield Monitor** ワークフローを選択
-3. **Run workflow** → **Run workflow** をクリック
-
-## 📁 ファイル構成
-
-```
-etf-yield-monitor/
-├── .github/workflows/
-│   └── monitor.yml          # GitHub Actions設定（毎日自動実行）
-├── src/
-│   ├── etf_monitor.py       # メインスクリプト
-│   └── config.py            # 設定ファイル（閾値など）
-├── data/
-│   └── state.json           # 状態管理（自動更新）
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
-
-## 📊 state.jsonの構造
+### state.jsonの構造
 
 ```json
 {
   "VYM": {
-    "status": "below",
-    "current_yield": 2.95,
-    "threshold": 3.32,
-    "cumulative_avg": 3.02,
-    "last_trade_date": "2025-11-14",
+    "status": "above",
+    "current_yield": 4.0,
+    "threshold": 3.03,
+    "last_trade_date": "2025-11-17",
+    "last_year": 2025,
     "baseline": {
       "years": 18,
       "yield": 3.03
     },
-    "year_data": {
-      "year": 2025,
-      "year_avg": 2.95,
-      "year_days": 220
-    },
-    "last_checked": "2025-11-16",
-    "last_notified": "2025-11-10",
-    "last_reminded": null,
-    "crossed_above_date": null
+    "last_checked": "2025-11-17",
+    "last_notified": "2025-11-17",
+    "last_reminded": "2025-11-17",
+    "crossed_above_date": "2025-11-17"
   }
 }
 ```
 
-**各フィールドの説明:**
-- `cumulative_avg`: 取引日数ベースで計算された累積平均
-- `baseline`: 過去年度の平均（年ベースで更新）
-- `year_data.year_days`: 実際の取引日数（土日祝除外）
-
-## 📊 通知メッセージの内容
-
-- 配当利回り（%）
-- 動的閾値と累積平均
-- 現在価格（USD / JPY）
-- 年間配当額（USD / JPY）
-- USD/JPY為替レート
-- 通知理由（上抜け/下抜け/リマインダー）
-
-## 🔧 トラブルシューティング
-
-### GitHub Actionsが動かない
-
-1. **Actions** タブで実行ログを確認
-2. `DISCORD_WEBHOOK_URL` Secretが正しく設定されているか確認
-3. `data/state.json` が存在するか確認
-
-### データ取得エラー
-
-- yfinanceはたまにレート制限に引っかかることがあります
-- 数時間待ってから再実行してください
-- 長期停止後の再起動時は自動でデータ補完されます
-
-### 通知が来ない
-
-1. Webhook URLが正しいか確認
-2. Discordサーバーでボットに投稿権限があるか確認
-3. ローカルで手動実行してテスト
-4. 閾値設定が適切か確認（高すぎないか）
-
-### state.jsonが壊れた場合
-
-自動でバックアップが作成され、初期状態で再起動します:
-```
-⚠️ state.jsonが壊れています: ...
-   バックアップを作成して初期化します...
-   バックアップ: data/state.json.backup
-```
-
-## 🔄 年度更新について
-
-**完全自動 - 何もする必要なし！**
-
-### 年度更新時の処理（12月31日 → 1月1日）
-
-```python
-# 2025年のデータでbaseline更新（年ベース）
-new_baseline_yield = (3.03% × 18年 + 3.10%) / 19年 = 3.033%
-new_baseline_years = 19
-
-# 2026年の累積平均計算は取引日数ベース
-baseline_days = 19 × 252 = 4,788日
-cumulative_avg = (3.033% × 4788 + year_avg × year_days) / (4788 + year_days)
-```
-
-**ポイント:**
-- baseline更新は**年ベース**（各年を均等に扱う）
-- 累積平均計算は**取引日数ベース**（年初の変動に強い）
-- `config.py` の編集不要
-
-## 💡 ベストプラクティス
-
-### 推奨設定
-
-```python
-# 頻繁に通知が欲しい場合
-"threshold_offset": 0.2  # 累積平均 + 0.2%
-
-# バランス型（おすすめ）
-"threshold_offset": 0.3  # 累積平均 + 0.3%
-
-# 本当の買い場のみ
-"threshold_offset": 0.5  # 累積平均 + 0.5%
-```
-
-### 実行時刻の選択
-
-- **推奨**: UTC 21:00（JST 6:00）- 米国市場終了後
-- **代替**: UTC 14:00（JST 23:00）- 日本の夜
-
-### データの信頼性
-
-- 初回起動時: 約15秒（年初来データ取得）
-- 通常実行: 約5-10秒
-- 欠落補完時: 約20-45秒（欠落期間による）
-
-すべてGitHub Actions無料枠内です（月2,000分）
-
-## 🛡️ セキュリティ
-
-- Discord Webhook URLはGitHub Secretsで暗号化保存
-- コード内にAPIキーや機密情報は含まれません
-- state.jsonには個人の投資額や保有銘柄情報は含まれません
-
-## 📝 ライセンス
+## ライセンス
 
 MIT License
 
-## 🤝 貢献
+## 免責事項
 
-Issue・Pull Request歓迎です！
-
-## 🆕 更新履歴
-
-### v2.1 - 取引日数ベース計算
-- 累積平均を取引日数ベースで計算（年初の変動に強い）
-- baseline更新は年ベース（各年を均等に扱う）
-- 年初1日目でも閾値が安定
-
-### v2.0 - 動的閾値システム
-- 完全自動の閾値更新機能
-- データ欠落自動補完
-- 年度移行自動処理
-- 取引日ベースの正確なカウント
-
-### v1.0 - 初版
-- 基本的な利回り監視機能
-- Discord通知
-- 固定閾値
+このBotは情報提供のみを目的としており、投資助言ではありません。投資判断は自己責任で行ってください。

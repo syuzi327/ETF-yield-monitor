@@ -20,7 +20,7 @@ from pathlib import Path
 script_dir = Path(__file__).parent
 sys.path.insert(0, str(script_dir))
 
-from config import ETFS, REMINDER_INTERVAL_DAYS, STATE_FILE
+from config import ETFS, STATE_FILE
 
 
 def get_etf_data(ticker):
@@ -98,28 +98,52 @@ def get_current_threshold(ticker, config, state):
     }
 
 
-def should_update_baseline(ticker, state):
+def should_update_baseline(ticker, state, config):
     """
-    baselineを更新すべきか判定（年度更新時のみTrue）
+    baselineを更新すべきか判定
     
     Returns:
-        tuple: (should_update: bool, last_year: int)
+        tuple: (should_update: bool, last_year: int, is_initial: bool)
     """
     from datetime import datetime
     
     current_year = datetime.now().year
     
+    # 初回起動の場合
     if ticker not in state or "last_year" not in state[ticker]:
-        # 初回実行 or 旧形式のstate → 今年の年を記録するのみ
-        return False, None
+        # config.pyの baseline_year_end（baselineの最終年）を取得
+        baseline_year_end = config.get("baseline_year_end", current_year - 1)
+        
+        # 初回起動でも欠落がある場合は補完が必要
+        # baseline_year_endの次の年から補完開始（二重計上を防ぐ）
+        if baseline_year_end < current_year - 1:
+            print(f"  🆕 初回起動: {baseline_year_end}年以降のデータ欠落を検知")
+            return True, baseline_year_end, True
+        
+        return False, None, True  # 初回起動だが補完不要
     
     last_year = state[ticker]["last_year"]
     
     # 年が変わっている場合
     if last_year < current_year:
-        return True, last_year
+        return True, last_year, False
     
-    return False, None
+    return False, None, False
+
+
+def get_next_saturday():
+    """次の土曜日の日付を取得"""
+    from datetime import datetime, timedelta
+    
+    today = datetime.now().date()
+    days_until_saturday = (5 - today.weekday()) % 7  # 土曜日は5
+    
+    if days_until_saturday == 0:
+        # 今日が土曜日の場合は次の土曜日
+        days_until_saturday = 7
+    
+    next_saturday = today + timedelta(days=days_until_saturday)
+    return next_saturday.isoformat()
 
 
 def get_year_average_from_history(ticker, year):
@@ -186,15 +210,16 @@ def get_year_average_from_history(ticker, year):
         return None
 
 
-def update_baseline(ticker, last_year, state, config):
+def update_baseline(ticker, last_year, state, config, is_initial=False):
     """
     baselineを更新（年度更新時に前年の実績を反映）
     
     Args:
         ticker: ETFティッカー
-        last_year: 前年の年度
+        last_year: 前年の年度（初回起動時はbaseline_year_end）
         state: 現在の状態
         config: 設定
+        is_initial: 初回起動かどうか
     
     Returns:
         dict: 更新後のbaseline情報（失敗時はNone）
@@ -216,50 +241,71 @@ def update_baseline(ticker, last_year, state, config):
         "yield": baseline_yield
     }
     
-    # 前年の実績を計算（常に実データから取得）
-    print(f"  📅 前年({last_year}年)の実績を計算中...")
-    last_year_avg = get_year_average_from_history(ticker, last_year)
-    
-    if not last_year_avg:
-        print(f"  ⚠️ 前年データ取得失敗 - baseline更新をスキップ")
+    # 初回起動の場合: baseline_year_end + 1年から開始（二重計上を防ぐ）
+    if is_initial:
+        start_year = last_year + 1  # baseline_year_endの次の年から
+        print(f"  🆕 初回起動: {start_year}年以降のデータを補完します")
+    else:
+        start_year = last_year
+        # 前年の実績を計算（通常の年度更新）
+        print(f"  📅 前年({last_year}年)の実績を計算中...")
+        last_year_avg = get_year_average_from_history(ticker, last_year)
         
-        # エラー通知を送信
-        error_embed = create_discord_embed(
-            "error_baseline",
-            ticker,
-            None,  # etf_dataなし
-            0,     # exchange_rateなし
-            0,     # thresholdなし
-            f"{last_year}年の実績データ取得に失敗したため、Baselineの自動更新をスキップしました。現在のBaselineで監視を続行します。",
-            baseline_data=old_baseline
-        )
-        send_discord_notification(error_embed)
+        if not last_year_avg:
+            print(f"  ⚠️ 前年データ取得失敗 - baseline更新をスキップ")
+            
+            # エラー通知を送信
+            error_embed = create_discord_embed(
+                "error_baseline",
+                ticker,
+                None,
+                0,
+                0,
+                f"{last_year}年の実績データ取得に失敗したため、Baselineの自動更新をスキップしました。現在のBaselineで監視を続行します。",
+                baseline_data=old_baseline
+            )
+            send_discord_notification(error_embed)
+            
+            return None
         
-        return None  # 更新失敗を示す
+        # baselineを更新
+        new_baseline_yield = (baseline_yield * baseline_years + last_year_avg) / (baseline_years + 1)
+        new_baseline_years = baseline_years + 1
+        
+        print(f"  📈 Baseline更新: {baseline_yield:.2f}% ({baseline_years}年) → {new_baseline_yield:.2f}% ({new_baseline_years}年)")
+        print(f"     {last_year}年実績: {last_year_avg:.2f}% を反映")
+        
+        # 更新後の値を使用
+        baseline_yield = new_baseline_yield
+        baseline_years = new_baseline_years
+        start_year = last_year + 1
     
-    # 前年のデータでbaselineを更新
-    new_baseline_yield = (baseline_yield * baseline_years + last_year_avg) / (baseline_years + 1)
-    new_baseline_years = baseline_years + 1
-    
-    print(f"  📈 Baseline更新: {baseline_yield:.2f}% ({baseline_years}年) → {new_baseline_yield:.2f}% ({new_baseline_years}年)")
-    print(f"     {last_year}年実績: {last_year_avg:.2f}% を反映")
-    
-    # 複数年飛ばした場合は欠落データを補完
-    years_gap = current_year - last_year
-    if years_gap > 1:
-        print(f"  ⚠️ {years_gap - 1}年分のデータが欠落 → 自動補完を試行")
+    # 欠落データの補完（初回起動または複数年飛ばした場合）
+    years_gap = current_year - start_year
+    if years_gap > 0:
+        if years_gap > 1 or is_initial:
+            if is_initial:
+                print(f"  ⚠️ {years_gap}年分のデータが欠落 → 自動補完を試行")
+            else:
+                print(f"  ⚠️ {years_gap - 1}年分のデータが欠落 → 自動補完を試行")
         
         # 欠落した年を順番に処理
-        for year in range(last_year + 1, current_year):
+        for year in range(start_year, current_year):
             print(f"  📅 {year}年のデータを補完中...")
             
             year_avg = get_year_average_from_history(ticker, year)
             
             if year_avg:
                 # baselineを更新
-                new_baseline_yield = (new_baseline_yield * new_baseline_years + year_avg) / (new_baseline_years + 1)
-                new_baseline_years += 1
-                print(f"    ✅ {year}年: {year_avg:.2f}% → Baseline更新: {new_baseline_yield:.2f}% ({new_baseline_years}年)")
+                new_baseline_yield = (baseline_yield * baseline_years + year_avg) / (baseline_years + 1)
+                new_baseline_years = baseline_years + 1
+                baseline_yield = new_baseline_yield
+                baseline_years = new_baseline_years
+                print(f"    ✅ {year}年: {year_avg:.2f}% → Baseline更新: {baseline_yield:.2f}% ({baseline_years}年)")
+                
+                # 最後に成功した年を記録
+                last_successful_year = year
+                last_year_avg = year_avg
             else:
                 print(f"    ⚠️ {year}年: データ取得失敗 - スキップ")
                 
@@ -271,17 +317,28 @@ def update_baseline(ticker, last_year, state, config):
                     0,
                     0,
                     f"欠落データ補完: {year}年の実績データ取得に失敗しました。この年のデータをスキップしてBaseline更新を続行します。",
-                    baseline_data={"years": new_baseline_years, "yield": round(new_baseline_yield, 2)}
+                    baseline_data={"years": baseline_years, "yield": round(baseline_yield, 2)}
                 )
                 send_discord_notification(error_embed)
     
-    return {
-        "years": new_baseline_years,
-        "yield": round(new_baseline_yield, 2),
-        "old_baseline": old_baseline,  # 成功通知用
-        "last_year": last_year,
-        "last_year_avg": last_year_avg
-    }
+    # 更新結果を返す（最後に処理した年の情報を含む）
+    if is_initial:
+        # 初回起動の場合、最後に成功した年を使用
+        return {
+            "years": baseline_years,
+            "yield": round(baseline_yield, 2),
+            "old_baseline": old_baseline,
+            "last_year": last_successful_year if 'last_successful_year' in locals() else start_year - 1,
+            "last_year_avg": last_year_avg if 'last_year_avg' in locals() else None
+        }
+    else:
+        return {
+            "years": baseline_years,
+            "yield": round(baseline_yield, 2),
+            "old_baseline": old_baseline,
+            "last_year": last_year,
+            "last_year_avg": last_year_avg
+        }
 
 
 def get_exchange_rate():
@@ -375,12 +432,19 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
     Returns:
         tuple: (should_notify: bool, notification_type: str, reason: str)
     """
-    today = datetime.now().date().isoformat()
+    from datetime import datetime
+    
+    today = datetime.now().date()
+    today_iso = today.isoformat()
     last_trade_date = etf_data.get("last_trade_date")
     
     # 初回実行
     if ticker not in state:
-        return False, "initial", "初回実行"
+        # 初回でaboveの場合
+        if current_yield >= threshold:
+            return True, "initial_above", f"初回起動時点で閾値を上回っています: {current_yield:.2f}% ≥ {threshold:.2f}%"
+        else:
+            return True, "initial", "初回起動"
     
     prev_state = state[ticker]
     prev_status = prev_state.get("status", "below")
@@ -402,14 +466,20 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
     if prev_status == "above" and current_yield < threshold:
         return True, "crossed_below", f"閾値下抜け: {prev_yield:.2f}% → {current_yield:.2f}%"
     
-    # 閾値超過中の週次リマインダー
+    # 閾値超過中の週次リマインダー（土曜日のみ）
     if prev_status == "above" and current_yield >= threshold:
-        if last_reminded:
-            last_reminded_date = datetime.fromisoformat(last_reminded).date()
-            days_since_reminder = (datetime.now().date() - last_reminded_date).days
-            
-            if days_since_reminder >= REMINDER_INTERVAL_DAYS:
-                return True, "reminder", f"週次リマインダー（継続{days_since_reminder}日目）"
+        # 今日が土曜日かチェック
+        if today.weekday() == 5:  # 土曜日
+            if last_reminded:
+                last_reminded_date = datetime.fromisoformat(last_reminded).date()
+                
+                # 前回のリマインダーから7日以上経過しているか
+                days_since_reminder = (today - last_reminded_date).days
+                if days_since_reminder >= 7:
+                    return True, "reminder", f"週次リマインダー（土曜日、継続{days_since_reminder}日目）"
+            else:
+                # last_remindedがない場合（初回above後の最初の土曜日）
+                return True, "reminder", "週次リマインダー（土曜日）"
     
     return False, None, "通知不要"
 
@@ -422,7 +492,8 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
         "crossed_above": 0x00FF00,      # 緑（上抜け）
         "crossed_below": 0xFF0000,      # 赤（下抜け）
         "reminder": 0xFFFF00,           # 黄（リマインダー）
-        "initial": 0x0099FF,            # 青（初回起動）
+        "initial": 0x0099FF,            # 青（初回起動 - below）
+        "initial_above": 0xFF6600,      # オレンジ（初回起動 - above）
         "baseline_updated": 0x9966FF,   # 紫（Baseline更新成功）
         "error_etf_data": 0xFF0000,     # 赤（ETFデータ取得失敗）
         "error_baseline": 0xFF9900,     # オレンジ（Baseline更新失敗）
@@ -434,6 +505,7 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
         "crossed_below": "📉 利回り閾値下抜け",
         "reminder": "📌 週次リマインダー",
         "initial": "✅ 監視開始",
+        "initial_above": "⚠️ 監視開始（閾値超過中）",
         "baseline_updated": "📊 Baseline自動更新",
         "error_etf_data": "❌ データ取得失敗",
         "error_baseline": "❌ Baseline更新失敗",
@@ -519,12 +591,21 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
     ]
     
     # 初回起動時はBaseline情報を追加
-    if notification_type == "initial" and baseline_data:
+    if notification_type in ["initial", "initial_above"] and baseline_data:
         fields.append({
             "name": "ℹ️ Baseline",
             "value": f"{baseline_data['yield']}% ({baseline_data['years']}年)",
             "inline": True
         })
+        
+        # initial_aboveの場合は次回リマインダー日を追加
+        if notification_type == "initial_above":
+            next_saturday = get_next_saturday()
+            fields.append({
+                "name": "📅 次回リマインダー",
+                "value": f"{next_saturday} (土曜日)",
+                "inline": False
+            })
     
     # 価格情報
     fields.extend([
@@ -630,9 +711,9 @@ def main():
         
         # 年度更新チェック（baselineの自動更新）
         baseline_update_success = False
-        should_update, last_year = should_update_baseline(ticker, state)
+        should_update, last_year, is_initial = should_update_baseline(ticker, state, config)
         if should_update:
-            new_baseline = update_baseline(ticker, last_year, state, config)
+            new_baseline = update_baseline(ticker, last_year, state, config, is_initial)
             
             if new_baseline:
                 # baselineを即座に反映
@@ -652,15 +733,22 @@ def main():
         print(f"閾値: {threshold}% (Baseline: {threshold_data['baseline_yield']}%, {threshold_data['baseline_years']}年)")
         print(f"価格: ${etf_data['price_usd']} (¥{etf_data['price_usd'] * exchange_rate:,.0f})")
         
-        # Baseline更新成功の通知
+        # Baseline更新成功の通知（初回起動の欠落補完を含む）
         if baseline_update_success and new_baseline:
+            if is_initial:
+                # 初回起動時の欠落補完
+                update_message = f"初回起動時に {last_year}年以降のデータ欠落を検知し、自動補完してBaselineを更新しました。"
+            else:
+                # 通常の年度更新
+                update_message = f"{new_baseline['last_year']}年実績 {new_baseline['last_year_avg']:.2f}% を反映してBaselineを更新しました。"
+            
             update_embed = create_discord_embed(
                 "baseline_updated",
                 ticker,
                 etf_data,
                 exchange_rate,
                 threshold,
-                f"{new_baseline['last_year']}年実績 {new_baseline['last_year_avg']:.2f}% を反映してBaselineを更新しました。新しい閾値で監視を続行します。",
+                update_message,
                 baseline_data={
                     "years": new_baseline["years"],
                     "yield": new_baseline["yield"]
@@ -677,14 +765,14 @@ def main():
         print(f"判定: {reason}")
         
         # 初回起動の通知
-        if notification_type == "initial":
+        if notification_type in ["initial", "initial_above"]:
             initial_embed = create_discord_embed(
-                "initial",
+                notification_type,
                 ticker,
                 etf_data,
                 exchange_rate,
                 threshold,
-                "初回起動。この閾値で監視を開始します。",
+                reason if notification_type == "initial_above" else "初回起動。この閾値で監視を開始します。",
                 baseline_data={
                     "years": threshold_data["baseline_years"],
                     "yield": threshold_data["baseline_yield"]
@@ -725,10 +813,14 @@ def main():
             new_state["crossed_above_date"] = prev_state.get("crossed_above_date")
         
         # 通知を送った場合の更新（初回起動も含む）
-        if should_send or notification_type == "initial":
+        if should_send or notification_type in ["initial", "initial_above"]:
             new_state["last_notified"] = today
             
             if notification_type == "crossed_above":
+                new_state["crossed_above_date"] = today
+                new_state["last_reminded"] = today
+            elif notification_type == "initial_above":
+                # 初回aboveの場合もリマインダー設定
                 new_state["crossed_above_date"] = today
                 new_state["last_reminded"] = today
             elif notification_type == "reminder":
