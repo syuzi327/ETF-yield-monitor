@@ -43,6 +43,11 @@ jobs:
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add data/state.json
-        git diff --quiet && git diff --staged --quiet || git commit -m "Update state.json [skip ci]"
+        # 1. タイムゾーンをJSTに設定し、今日の日付を取得
+        export TZ="Asia/Tokyo"
+        TODAY=$(date +'%Y-%m-%d')
+          
+        # 2. コミットメッセージで変数 $TODAY を使う
+        git diff --quiet && git diff --staged --quiet || git commit -m "bot: Update state.json ($TODAY) [skip ci]"
         git push
       continue-on-error: true
