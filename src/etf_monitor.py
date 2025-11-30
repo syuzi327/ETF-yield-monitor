@@ -13,7 +13,7 @@ import sys
 import json
 import yfinance as yf
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # スクリプトのディレクトリをパスに追加
@@ -688,7 +688,11 @@ def send_discord_notification(embed):
 
 def main():
     """メイン処理"""
-    print(f"=== ETF利回り監視開始: {datetime.now()} ===\n")
+    # 日本時間（JST = UTC+9）
+    jst = timezone(timedelta(hours=9))
+    now_jst = datetime.now(jst)
+    
+    print(f"=== ETF利回り監視開始: {now_jst.strftime('%Y-%m-%d %H:%M:%S JST')} ===\n")
     
     # 為替レート取得
     exchange_rate = get_exchange_rate()
