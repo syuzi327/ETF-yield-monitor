@@ -446,7 +446,8 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
         tuple: (should_notify: bool, notification_type: str, reason: str)
     """
     
-    today = datetime.now().date()
+    jst = timezone(timedelta(hours=9))
+    today = datetime.now(jst).date()
     today_iso = today.isoformat()
     last_trade_date = etf_data.get("last_trade_date")
     
