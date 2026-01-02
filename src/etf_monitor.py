@@ -124,7 +124,11 @@ def should_update_baseline(ticker, state, config):
     
     last_year = state[ticker]["last_year"]
     
-    # 年が変わっている場合
+    # すでに今年のデータで更新済み（年度更新の重複実行を防ぐ）
+    if last_year == current_year:
+        return False, None, False
+    
+    # 年が変わっている場合（前年のデータで更新）
     if last_year < current_year:
         return True, last_year, False
     
@@ -744,6 +748,7 @@ def main():
         
         # 年度更新チェック（baselineの自動更新）
         baseline_update_success = False
+        new_baseline = None
         should_update, last_year, is_initial = should_update_baseline(ticker, state, config)
         if should_update:
             new_baseline = update_baseline(ticker, last_year, state, config, is_initial)
@@ -756,6 +761,8 @@ def main():
                     "years": new_baseline["years"],
                     "yield": new_baseline["yield"]
                 }
+                # last_yearを今年に更新（年度更新の重複を防ぐ）
+                state[ticker]["last_year"] = current_year
                 baseline_update_success = True
         
         # 閾値を取得（更新されたbaselineを使用）
