@@ -1,60 +1,60 @@
 {
   "VYM": {
     "status": "below",
-    "current_yield": 2.26,
+    "current_yield": 2.25,
     "threshold": 3.0,
-    "last_trade_date": "2026-02-12",
+    "last_trade_date": "2026-02-13",
     "last_year": 2026,
     "baseline": {
       "years": 19,
       "yield": 3.0
     },
-    "last_checked": "2026-02-12",
+    "last_checked": "2026-02-13",
     "last_notified": "2025-12-22",
     "last_reminded": null,
     "crossed_above_date": null
   },
   "HDV": {
     "status": "below",
-    "current_yield": 2.83,
+    "current_yield": 2.82,
     "threshold": 3.53,
-    "last_trade_date": "2026-02-12",
+    "last_trade_date": "2026-02-13",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.53
     },
-    "last_checked": "2026-02-12",
+    "last_checked": "2026-02-13",
     "last_notified": "2025-11-17",
     "last_reminded": null,
     "crossed_above_date": null
   },
   "SPYD": {
     "status": "below",
-    "current_yield": 4.11,
+    "current_yield": 4.07,
     "threshold": 4.57,
-    "last_trade_date": "2026-02-12",
+    "last_trade_date": "2026-02-13",
     "last_year": 2026,
     "baseline": {
       "years": 10,
       "yield": 4.57
     },
-    "last_checked": "2026-02-12",
+    "last_checked": "2026-02-13",
     "last_notified": "2025-11-21",
     "last_reminded": null,
     "crossed_above_date": null
   },
   "SCHD": {
     "status": "below",
-    "current_yield": 3.34,
+    "current_yield": 3.31,
     "threshold": 3.52,
-    "last_trade_date": "2026-02-12",
+    "last_trade_date": "2026-02-13",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.52
     },
-    "last_checked": "2026-02-12",
+    "last_checked": "2026-02-13",
     "last_notified": "2026-01-30",
     "last_reminded": null,
     "crossed_above_date": null
