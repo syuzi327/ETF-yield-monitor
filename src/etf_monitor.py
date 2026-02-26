@@ -471,39 +471,27 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
     last_reminded = prev_state.get("last_reminded")
     last_update_date = prev_state.get("last_trade_date")
 
-    # 取引日チェック: 前回と同じ日付なら更新しない（土日・祝日・配当落ち異常値対策）
-    if last_trade_date and last_trade_date == last_update_date:
-        print(f"  💤 取引なし（前回: {last_update_date}）- データ更新スキップ")
-        return False, "no_trade", "取引日なし"
-
     # 閾値超過中の週次リマインダー（土曜日のみ）
     if prev_status == "above" and current_yield >= threshold:
         # 今日が土曜日かチェック
         if today.weekday() == 5:  # 土曜日
+            crossed_above_date = prev_state.get("crossed_above_date")
+            days_above = (today - datetime.fromisoformat(crossed_above_date).date()).days if crossed_above_date else 0
             if last_reminded:
                 last_reminded_date = datetime.fromisoformat(last_reminded).date()
-                
+
                 # 前回のリマインダーから7日以上経過しているか
-                days_since_last_reminder = (today - last_reminded_date).days
-                if days_since_last_reminder >= 7:
-                    # 閾値上抜けからの累積日数を計算
-                    crossed_above_date = prev_state.get("crossed_above_date")
-                    if crossed_above_date:
-                        crossed_date = datetime.fromisoformat(crossed_above_date).date()
-                        days_since_crossed = (today - crossed_date).days
-                        return True, "reminder", f"週次リマインダー（土曜日、継続{days_since_crossed}日目）"
-                    else:
-                        # crossed_above_dateがない場合（データ不整合）
-                        return True, "reminder", f"週次リマインダー（土曜日、継続{days_since_last_reminder}日目）"
+                days_since_reminder = (today - last_reminded_date).days
+                if days_since_reminder >= 7:
+                    return True, "reminder", f"週次リマインダー（土曜日、継続{days_above}日目）"
             else:
                 # last_remindedがない場合（初回above後の最初の土曜日）
-                crossed_above_date = prev_state.get("crossed_above_date")
-                if crossed_above_date:
-                    crossed_date = datetime.fromisoformat(crossed_above_date).date()
-                    days_since_crossed = (today - crossed_date).days
-                    return True, "reminder", f"週次リマインダー（土曜日、継続{days_since_crossed}日目）"
-                else:
-                    return True, "reminder", "週次リマインダー（土曜日）"
+                return True, "reminder", f"週次リマインダー（土曜日、継続{days_above}日目）"
+
+    # 取引日チェック: 前回と同じ日付なら更新しない（土日・祝日対策）
+    if last_trade_date and last_trade_date == last_update_date:
+        print(f"  💤 取引なし（前回: {last_update_date}）- 通知判定スキップ")
+        return False, "no_trade", "取引日なし"
     
     # 通常の上抜け検知
     if prev_status == "below" and current_yield >= threshold:
@@ -729,17 +717,53 @@ def main():
         etf_data = get_etf_data(ticker)
         if not etf_data:
             print(f"⚠️ {ticker} のデータ取得失敗\n")
-            
-            # ETFデータ取得失敗の通知
-            error_embed = create_discord_embed(
-                "error_etf_data",
-                ticker,
-                None,
-                0,
-                0,
-                f"{ETFS[ticker]['name']} のデータ取得に失敗しました。yfinance APIの問題、またはティッカーシンボルの変更が考えられます。この銘柄の監視をスキップします。"
-            )
-            send_discord_notification(error_embed)
+
+            jst = timezone(timedelta(hours=9))
+            today_date = datetime.now(jst).date()
+            is_weekend = today_date.weekday() >= 5  # 土日
+
+            # 土曜日リマインダーチェック（前回保存データを使用）
+            if today_date.weekday() == 5 and ticker in state:
+                prev = state[ticker]
+                if prev.get("status") == "above":
+                    last_reminded = prev.get("last_reminded")
+                    should_remind = False
+                    if last_reminded:
+                        days_since = (today_date - datetime.fromisoformat(last_reminded).date()).days
+                        should_remind = days_since >= 7
+                    else:
+                        should_remind = True
+
+                    if should_remind:
+                        crossed_above_date = prev.get("crossed_above_date", today_date.isoformat())
+                        days_above = (today_date - datetime.fromisoformat(crossed_above_date).date()).days
+                        reminded_etf_data = {
+                            "yield": prev.get("current_yield", 0),
+                            "price_usd": prev.get("price_usd", 0),
+                            "dividend_usd": prev.get("dividend_usd", 0),
+                            "last_trade_date": prev.get("last_trade_date"),
+                        }
+                        remind_embed = create_discord_embed(
+                            "reminder", ticker, reminded_etf_data,
+                            exchange_rate,
+                            prev.get("threshold", 0),
+                            f"週次リマインダー（土曜日、継続{days_above}日目）※前営業日データ"
+                        )
+                        send_discord_notification(remind_embed)
+                        state[ticker]["last_reminded"] = today_date.isoformat()
+                        print(f"  📌 土曜日リマインダー送信（前回データ使用）")
+
+            # 土日はデータ取得失敗通知を送らない（市場休場のため想定内）
+            if not is_weekend:
+                error_embed = create_discord_embed(
+                    "error_etf_data",
+                    ticker,
+                    None,
+                    0,
+                    0,
+                    f"{ETFS[ticker]['name']} のデータ取得に失敗しました。yfinance APIの問題、またはティッカーシンボルの変更が考えられます。この銘柄の監視をスキップします。"
+                )
+                send_discord_notification(error_embed)
             continue
         
         current_yield = etf_data["yield"]
@@ -840,6 +864,8 @@ def main():
         new_state = {
             "status": new_status,
             "current_yield": current_yield,
+            "price_usd": etf_data["price_usd"],
+            "dividend_usd": etf_data["dividend_usd"],
             "threshold": threshold,
             "last_trade_date": last_trade_date,
             "last_year": current_year,  # 年度追跡用
