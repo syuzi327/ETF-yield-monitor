@@ -12,6 +12,7 @@ ETF配当利回り監視Bot（円建て）- 最終版
 import os
 import sys
 import json
+import shutil
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,45 @@ script_dir = Path(__file__).parent
 sys.path.insert(0, str(script_dir))
 
 from config import ETFS, STATE_FILE
+
+# 日本時間タイムゾーン
+JST = timezone(timedelta(hours=9))
+
+
+def iso_to_date(s):
+    """ISO形式の日付文字列をdate型に変換"""
+    return datetime.fromisoformat(s).date()
+
+
+def _etf_data_from_state(prev_state):
+    """保存された状態からETFデータを復元"""
+    return {
+        "yield": prev_state.get("current_yield", 0),
+        "price_usd": prev_state.get("price_usd", 0),
+        "dividend_usd": prev_state.get("dividend_usd", 0),
+        "last_trade_date": prev_state.get("last_trade_date"),
+    }
+
+
+def _check_saturday_reminder(prev_state, today):
+    """
+    土曜日リマインダーを送るべきか判定（データ取得失敗時フォールバック兼用）
+
+    Returns:
+        tuple: (should_remind: bool, days_above: int)
+    """
+    if today.weekday() != 5:
+        return False, 0
+    if prev_state.get("status") != "above":
+        return False, 0
+
+    crossed_above_date = prev_state.get("crossed_above_date")
+    days_above = (today - iso_to_date(crossed_above_date)).days if crossed_above_date else 0
+
+    last_reminded = prev_state.get("last_reminded")
+    if last_reminded:
+        return (today - iso_to_date(last_reminded)).days >= 7, days_above
+    return True, days_above
 
 
 def get_etf_data(ticker):
@@ -52,9 +92,10 @@ def get_etf_data(ticker):
             else:
                 # 配当データがない場合はinfoから取得（fallback）
                 info = etf.info
-                dividend_yield = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0
+                dv = info.get("dividendYield")
+                dividend_yield = dv * 100 if dv else 0
                 annual_dividend = info.get("dividendRate", 0)
-        except:
+        except Exception:
             dividend_yield = 0
             annual_dividend = 0
         
@@ -107,8 +148,8 @@ def should_update_baseline(ticker, state, config):
         tuple: (should_update: bool, last_year: int, is_initial: bool)
     """
     
-    current_year = datetime.now().year
-    
+    current_year = datetime.now(JST).year
+
     # 初回起動の場合
     if ticker not in state or "last_year" not in state[ticker]:
         # config.pyの baseline_year_end（baselineの最終年）を取得
@@ -148,7 +189,7 @@ def get_next_reminder_saturday(base_date):
     
     # 文字列の場合はdateに変換
     if isinstance(base_date, str):
-        base_date = datetime.fromisoformat(base_date).date()
+        base_date = iso_to_date(base_date)
     
     # 基準日から7日後
     seven_days_later = base_date + timedelta(days=7)
@@ -159,9 +200,6 @@ def get_next_reminder_saturday(base_date):
     
     # そうでなければ、7日後以降の最初の土曜日を探す
     days_until_saturday = (5 - seven_days_later.weekday()) % 7
-    if days_until_saturday == 0:
-        days_until_saturday = 7
-    
     next_saturday = seven_days_later + timedelta(days=days_until_saturday)
     return next_saturday.isoformat()
 
@@ -204,25 +242,25 @@ def get_year_average_from_history(ticker, year):
             if not dividends.empty:
                 # その年の配当を取得
                 year_dividends = dividends[(dividends.index >= start) & (dividends.index <= end)]
-                
+
                 if not year_dividends.empty:
                     # 年間分配金総額
                     annual_dividend = year_dividends.sum()
-                    
+
                     # 利回り = 年間分配金総額 ÷ 年末株価
                     dividend_yield = (annual_dividend / year_end_price) * 100
-                    
+
                     print(f"    ✅ {year}年: 分配金 ${annual_dividend:.2f}, 年末株価 ${year_end_price:.2f}, 利回り {dividend_yield:.2f}%")
                     return round(dividend_yield, 2)
                 else:
                     print(f"    ⚠️ {year}年: 分配金データなし")
                     return None
+            else:
+                print(f"    ⚠️ {year}年: 配当データ不足")
+                return None
         except Exception as e:
             print(f"    ⚠️ {year}年: 分配金データ取得エラー: {e}")
             return None
-        
-        print(f"    ⚠️ {year}年: 配当データ不足")
-        return None
             
     except Exception as e:
         print(f"    ⚠️ {year}年: データ取得エラー: {e}")
@@ -244,8 +282,8 @@ def update_baseline(ticker, last_year, state, config, is_initial=False):
         dict: 更新後のbaseline情報（失敗時はNone）
     """
     
-    current_year = datetime.now().year
-    
+    current_year = datetime.now(JST).year
+
     # 現在のbaselineを取得
     if ticker in state and "baseline" in state[ticker]:
         baseline_years = state[ticker]["baseline"]["years"]
@@ -269,7 +307,7 @@ def update_baseline(ticker, last_year, state, config, is_initial=False):
         print(f"  📅 前年({last_year}年)の実績を計算中...")
         last_year_avg = get_year_average_from_history(ticker, last_year)
         
-        if not last_year_avg:
+        if last_year_avg is None:
             print(f"  ⚠️ 前年データ取得失敗 - baseline更新をスキップ")
             
             # エラー通知を送信
@@ -300,33 +338,35 @@ def update_baseline(ticker, last_year, state, config, is_initial=False):
     
     # 欠落データの補完（初回起動または複数年飛ばした場合）
     years_gap = current_year - start_year
+    last_successful_year = None  # ループ内でのみ更新
+    last_supplementary_avg = None  # 補完ループの最後の成功値（is_initial返却用）
     if years_gap > 0:
         if years_gap > 1 or is_initial:
             if is_initial:
                 print(f"  ⚠️ {years_gap}年分のデータが欠落 → 自動補完を試行")
             else:
                 print(f"  ⚠️ {years_gap - 1}年分のデータが欠落 → 自動補完を試行")
-        
+
         # 欠落した年を順番に処理
         for year in range(start_year, current_year):
             print(f"  📅 {year}年のデータを補完中...")
-            
+
             year_avg = get_year_average_from_history(ticker, year)
-            
-            if year_avg:
+
+            if year_avg is not None:
                 # baselineを更新
                 new_baseline_yield = (baseline_yield * baseline_years + year_avg) / (baseline_years + 1)
                 new_baseline_years = baseline_years + 1
                 baseline_yield = new_baseline_yield
                 baseline_years = new_baseline_years
                 print(f"    ✅ {year}年: {year_avg:.2f}% → Baseline更新: {baseline_yield:.2f}% ({baseline_years}年)")
-                
+
                 # 最後に成功した年を記録
                 last_successful_year = year
-                last_year_avg = year_avg
+                last_supplementary_avg = year_avg
             else:
                 print(f"    ⚠️ {year}年: データ取得失敗 - スキップ")
-                
+
                 # 欠落年のエラー通知
                 error_embed = create_discord_embed(
                     "error_baseline",
@@ -338,24 +378,28 @@ def update_baseline(ticker, last_year, state, config, is_initial=False):
                     baseline_data={"years": baseline_years, "yield": round(baseline_yield, 2)}
                 )
                 send_discord_notification(error_embed)
-    
-    # 更新結果を返す（最後に処理した年の情報を含む）
+
+    # 更新結果を返す
     if is_initial:
-        # 初回起動の場合、最後に成功した年を使用
+        # 初回起動: 全年失敗の場合は更新なしとして扱う
+        if last_successful_year is None:
+            print(f"  ⚠️ 補完データ全年取得失敗 - baseline更新をスキップ")
+            return None
         return {
             "years": baseline_years,
             "yield": round(baseline_yield, 2),
             "old_baseline": old_baseline,
-            "last_year": last_successful_year if 'last_successful_year' in locals() else start_year - 1,
-            "last_year_avg": last_year_avg if 'last_year_avg' in locals() else None
+            "last_year": last_successful_year,
+            "last_year_avg": last_supplementary_avg,
         }
     else:
+        # 通常更新: last_year_avg は補完ループで上書きされない（last_supplementary_avgを使用しない）
         return {
             "years": baseline_years,
             "yield": round(baseline_yield, 2),
             "old_baseline": old_baseline,
             "last_year": last_year,
-            "last_year_avg": last_year_avg
+            "last_year_avg": last_year_avg,
         }
 
 
@@ -420,7 +464,6 @@ def load_state():
             print(f"   バックアップを作成して初期化します...")
             
             backup_path = state_path.with_suffix(".json.backup")
-            import shutil
             shutil.copy(state_path, backup_path)
             print(f"   バックアップ: {backup_path}")
             
@@ -451,9 +494,7 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
         tuple: (should_notify: bool, notification_type: str, reason: str)
     """
     
-    jst = timezone(timedelta(hours=9))
-    today = datetime.now(jst).date()
-    today_iso = today.isoformat()
+    today = datetime.now(JST).date()
     last_trade_date = etf_data.get("last_trade_date")
     
     # 初回実行
@@ -467,26 +508,13 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
     prev_state = state[ticker]
     prev_status = prev_state.get("status", "below")
     prev_yield = prev_state.get("current_yield", 0)
-    last_notified = prev_state.get("last_notified")
-    last_reminded = prev_state.get("last_reminded")
     last_update_date = prev_state.get("last_trade_date")
 
     # 閾値超過中の週次リマインダー（土曜日のみ）
     if prev_status == "above" and current_yield >= threshold:
-        # 今日が土曜日かチェック
-        if today.weekday() == 5:  # 土曜日
-            crossed_above_date = prev_state.get("crossed_above_date")
-            days_above = (today - datetime.fromisoformat(crossed_above_date).date()).days if crossed_above_date else 0
-            if last_reminded:
-                last_reminded_date = datetime.fromisoformat(last_reminded).date()
-
-                # 前回のリマインダーから7日以上経過しているか
-                days_since_reminder = (today - last_reminded_date).days
-                if days_since_reminder >= 7:
-                    return True, "reminder", f"週次リマインダー（土曜日、継続{days_above}日目）"
-            else:
-                # last_remindedがない場合（初回above後の最初の土曜日）
-                return True, "reminder", f"週次リマインダー（土曜日、継続{days_above}日目）"
+        should_remind, days_above = _check_saturday_reminder(prev_state, today)
+        if should_remind:
+            return True, "reminder", f"週次リマインダー（土曜日、継続{days_above}日目）"
 
     # 取引日チェック: 前回と同じ日付なら更新しない（土日・祝日対策）
     if last_trade_date and last_trade_date == last_update_date:
@@ -504,7 +532,7 @@ def should_notify(ticker, current_yield, threshold, state, etf_data):
     return False, None, "通知不要"
 
 
-def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, threshold, reason, baseline_data=None, old_baseline=None):
+def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, threshold, reason, baseline_data=None, old_baseline=None, comparison_data=None):
     """Discord埋め込みメッセージを作成"""
     
     # 色の設定
@@ -620,7 +648,7 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
         
         # initial_aboveの場合は次回リマインダー日を追加
         if notification_type == "initial_above":
-            today = datetime.now().date()
+            today = datetime.now(JST).date()
             next_saturday = get_next_reminder_saturday(today)
             fields.append({
                 "name": "📅 次回リマインダー",
@@ -628,6 +656,38 @@ def create_discord_embed(notification_type, ticker, etf_data, exchange_rate, thr
                 "inline": False
             })
     
+    # リマインダーの場合は比較データを追加
+    if notification_type == "reminder" and comparison_data:
+        c_yield = comparison_data.get("crossed_above_yield")
+        c_price = comparison_data.get("crossed_above_price_jpy")
+        r_yield = comparison_data.get("last_reminded_yield")
+        r_price = comparison_data.get("last_reminded_price_jpy")
+
+        if c_yield is not None:
+            fields.append({
+                "name": "📊 上抜け時比（利回り）",
+                "value": f"{c_yield}% → {etf_data['yield']}%（{etf_data['yield'] - c_yield:+.2f}%）",
+                "inline": True
+            })
+        if c_price is not None:
+            fields.append({
+                "name": "📊 上抜け時比（価格）",
+                "value": f"¥{c_price:,.0f} → ¥{price_jpy:,.0f}（{price_jpy - c_price:+,.0f}）",
+                "inline": True
+            })
+        if r_yield is not None:
+            fields.append({
+                "name": "📅 前週比（利回り）",
+                "value": f"{r_yield}% → {etf_data['yield']}%（{etf_data['yield'] - r_yield:+.2f}%）",
+                "inline": True
+            })
+        if r_price is not None:
+            fields.append({
+                "name": "📅 前週比（価格）",
+                "value": f"¥{r_price:,.0f} → ¥{price_jpy:,.0f}（{price_jpy - r_price:+,.0f}）",
+                "inline": True
+            })
+
     # 価格情報
     fields.extend([
         {
@@ -697,8 +757,7 @@ def send_discord_notification(embed):
 def main():
     """メイン処理"""
     # 日本時間（JST = UTC+9）
-    jst = timezone(timedelta(hours=9))
-    now_jst = datetime.now(jst)
+    now_jst = datetime.now(JST)
     
     print(f"=== ETF利回り監視開始: {now_jst.strftime('%Y-%m-%d %H:%M:%S JST')} ===\n")
     
@@ -718,40 +777,33 @@ def main():
         if not etf_data:
             print(f"⚠️ {ticker} のデータ取得失敗\n")
 
-            jst = timezone(timedelta(hours=9))
-            today_date = datetime.now(jst).date()
-            is_weekend = today_date.weekday() >= 5  # 土日
+            today_date = datetime.now(JST).date()
+            is_weekend = today_date.weekday() >= 5
 
             # 土曜日リマインダーチェック（前回保存データを使用）
-            if today_date.weekday() == 5 and ticker in state:
+            if ticker in state:
                 prev = state[ticker]
-                if prev.get("status") == "above":
-                    last_reminded = prev.get("last_reminded")
-                    should_remind = False
-                    if last_reminded:
-                        days_since = (today_date - datetime.fromisoformat(last_reminded).date()).days
-                        should_remind = days_since >= 7
-                    else:
-                        should_remind = True
-
-                    if should_remind:
-                        crossed_above_date = prev.get("crossed_above_date", today_date.isoformat())
-                        days_above = (today_date - datetime.fromisoformat(crossed_above_date).date()).days
-                        reminded_etf_data = {
-                            "yield": prev.get("current_yield", 0),
-                            "price_usd": prev.get("price_usd", 0),
-                            "dividend_usd": prev.get("dividend_usd", 0),
-                            "last_trade_date": prev.get("last_trade_date"),
-                        }
-                        remind_embed = create_discord_embed(
-                            "reminder", ticker, reminded_etf_data,
-                            exchange_rate,
-                            prev.get("threshold", 0),
-                            f"週次リマインダー（土曜日、継続{days_above}日目）※前営業日データ"
-                        )
-                        send_discord_notification(remind_embed)
-                        state[ticker]["last_reminded"] = today_date.isoformat()
-                        print(f"  📌 土曜日リマインダー送信（前回データ使用）")
+                should_remind, days_above = _check_saturday_reminder(prev, today_date)
+                if should_remind:
+                    is_first = prev.get("last_reminded") == prev.get("crossed_above_date")
+                    comparison_data = {
+                        "crossed_above_yield":     prev.get("crossed_above_yield"),
+                        "crossed_above_price_jpy": prev.get("crossed_above_price_jpy"),
+                        "last_reminded_yield":     None if is_first else prev.get("last_reminded_yield"),
+                        "last_reminded_price_jpy": None if is_first else prev.get("last_reminded_price_jpy"),
+                    }
+                    remind_embed = create_discord_embed(
+                        "reminder", ticker, _etf_data_from_state(prev),
+                        exchange_rate,
+                        prev.get("threshold", 0),
+                        f"週次リマインダー（土曜日、継続{days_above}日目）※前営業日データ",
+                        comparison_data=comparison_data
+                    )
+                    send_discord_notification(remind_embed)
+                    state[ticker]["last_reminded"]           = today_date.isoformat()
+                    state[ticker]["last_reminded_yield"]     = prev.get("current_yield")
+                    state[ticker]["last_reminded_price_jpy"] = round(prev.get("price_usd", 0) * exchange_rate, 0)
+                    print(f"  📌 土曜日リマインダー送信（前回データ使用）")
 
             # 土日はデータ取得失敗通知を送らない（市場休場のため想定内）
             if not is_weekend:
@@ -768,7 +820,7 @@ def main():
         
         current_yield = etf_data["yield"]
         last_trade_date = etf_data.get("last_trade_date")
-        current_year = datetime.now().year
+        current_year = datetime.now(JST).year
         
         # 年度更新チェック（baselineの自動更新）
         baseline_update_success = False
@@ -798,7 +850,7 @@ def main():
         print(f"価格: ${etf_data['price_usd']} (¥{etf_data['price_usd'] * exchange_rate:,.0f})")
         
         # Baseline更新成功の通知（初回起動の欠落補完を含む）
-        if baseline_update_success and new_baseline:
+        if baseline_update_success:
             if is_initial:
                 # 初回起動時の欠落補完
                 update_message = f"初回起動時に {last_year}年以降のデータ欠落を検知し、自動補完してBaselineを更新しました。"
@@ -850,14 +902,24 @@ def main():
             send_discord_notification(initial_embed)
         elif should_send:
             # 通常の通知（上抜け・下抜け・リマインダー）
+            comparison_data = None
+            if notification_type == "reminder":
+                prev_s = state.get(ticker, {})
+                is_first = prev_s.get("last_reminded") == prev_s.get("crossed_above_date")
+                comparison_data = {
+                    "crossed_above_yield":     prev_s.get("crossed_above_yield"),
+                    "crossed_above_price_jpy": prev_s.get("crossed_above_price_jpy"),
+                    "last_reminded_yield":     None if is_first else prev_s.get("last_reminded_yield"),
+                    "last_reminded_price_jpy": None if is_first else prev_s.get("last_reminded_price_jpy"),
+                }
             embed = create_discord_embed(
-                notification_type, ticker, etf_data, exchange_rate, 
-                threshold, reason
+                notification_type, ticker, etf_data, exchange_rate,
+                threshold, reason, comparison_data=comparison_data
             )
             send_discord_notification(embed)
         
         # 状態更新
-        today = datetime.now().date().isoformat()
+        today = datetime.now(JST).date().isoformat()
         new_status = "above" if current_yield >= threshold else "below"
         
         # 状態オブジェクト作成
@@ -879,26 +941,45 @@ def main():
         # 前回の状態を引き継ぐ
         if ticker in state:
             prev_state = state[ticker]
-            new_state["last_notified"] = prev_state.get("last_notified")
-            new_state["last_reminded"] = prev_state.get("last_reminded")
-            new_state["crossed_above_date"] = prev_state.get("crossed_above_date")
+            new_state["last_notified"]           = prev_state.get("last_notified")
+            new_state["last_reminded"]           = prev_state.get("last_reminded")
+            new_state["crossed_above_date"]      = prev_state.get("crossed_above_date")
+            new_state["crossed_above_yield"]     = prev_state.get("crossed_above_yield")
+            new_state["crossed_above_price_jpy"] = prev_state.get("crossed_above_price_jpy")
+            new_state["last_reminded_yield"]     = prev_state.get("last_reminded_yield")
+            new_state["last_reminded_price_jpy"] = prev_state.get("last_reminded_price_jpy")
         
         # 通知を送った場合の更新（初回起動も含む）
         if should_send or notification_type in ["initial", "initial_above"]:
             new_state["last_notified"] = today
             
+            price_jpy_int = round(etf_data["price_usd"] * exchange_rate, 0)
             if notification_type == "crossed_above":
-                new_state["crossed_above_date"] = today
-                new_state["last_reminded"] = today
+                new_state["crossed_above_date"]      = today
+                new_state["last_reminded"]           = today
+                new_state["crossed_above_yield"]     = current_yield
+                new_state["crossed_above_price_jpy"] = price_jpy_int
+                new_state["last_reminded_yield"]     = current_yield
+                new_state["last_reminded_price_jpy"] = price_jpy_int
             elif notification_type == "initial_above":
                 # 初回aboveの場合もリマインダー設定
-                new_state["crossed_above_date"] = today
-                new_state["last_reminded"] = today
+                new_state["crossed_above_date"]      = today
+                new_state["last_reminded"]           = today
+                new_state["crossed_above_yield"]     = current_yield
+                new_state["crossed_above_price_jpy"] = price_jpy_int
+                new_state["last_reminded_yield"]     = current_yield
+                new_state["last_reminded_price_jpy"] = price_jpy_int
             elif notification_type == "reminder":
-                new_state["last_reminded"] = today
+                new_state["last_reminded"]           = today
+                new_state["last_reminded_yield"]     = current_yield
+                new_state["last_reminded_price_jpy"] = price_jpy_int
             elif notification_type == "crossed_below":
-                new_state["crossed_above_date"] = None
-                new_state["last_reminded"] = None
+                new_state["crossed_above_date"]      = None
+                new_state["last_reminded"]           = None
+                new_state["crossed_above_yield"]     = None
+                new_state["crossed_above_price_jpy"] = None
+                new_state["last_reminded_yield"]     = None
+                new_state["last_reminded_price_jpy"] = None
         
         state[ticker] = new_state
         print()
