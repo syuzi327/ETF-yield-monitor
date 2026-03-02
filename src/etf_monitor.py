@@ -247,11 +247,12 @@ def get_year_average_from_history(ticker, year):
 
         start = f"{year}-01-01"
         end = f"{year}-12-31"
+        end_for_history = f"{year+1}-01-01"
 
         print(f"    📊 {year}年のデータを取得中... ({start} ～ {end})")
 
-        # 履歴データ取得
-        history = etf.history(start=start, end=end)
+        # 履歴データ取得（end は翌年1/1を指定して年末最終営業日を確実に含める）
+        history = etf.history(start=start, end=end_for_history)
 
         if history.empty:
             print(f"    ⚠️ 履歴データ取得失敗")
@@ -490,8 +491,11 @@ def save_state(state):
         state_path = Path(STATE_FILE)
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ state.json保存エラー: {e}")
 
 
 def should_notify(ticker, current_yield, threshold, state, etf_data):
@@ -948,7 +952,7 @@ def process_ticker(ticker, config, state, exchange_rate, today, today_str, curre
         new_state["last_reminded_price_jpy"] = prev_state.get("last_reminded_price_jpy")
 
     # 通知を送った場合の更新（初回起動も含む）
-    if should_send or notification_type in ["initial", "initial_above"]:
+    if should_send:
         new_state["last_notified"] = today_str
 
         price_jpy_int = round(etf_data["price_usd"] * exchange_rate, 0)
