@@ -1,17 +1,17 @@
 {
   "VYM": {
     "status": "below",
-    "current_yield": 2.26,
-    "price_usd": 155.06,
+    "current_yield": 2.28,
+    "price_usd": 153.28,
     "dividend_usd": 3.5,
     "threshold": 3.0,
-    "last_trade_date": "2026-03-02",
+    "last_trade_date": "2026-03-03",
     "last_year": 2026,
     "baseline": {
       "years": 19,
       "yield": 3.0
     },
-    "last_checked": "2026-03-03",
+    "last_checked": "2026-03-04",
     "last_notified": "2025-12-22",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -22,17 +22,17 @@
   },
   "HDV": {
     "status": "below",
-    "current_yield": 2.79,
-    "price_usd": 140.18,
+    "current_yield": 2.83,
+    "price_usd": 138.39,
     "dividend_usd": 3.91,
     "threshold": 3.53,
-    "last_trade_date": "2026-03-02",
+    "last_trade_date": "2026-03-03",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.53
     },
-    "last_checked": "2026-03-03",
+    "last_checked": "2026-03-04",
     "last_notified": "2025-11-17",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -43,17 +43,17 @@
   },
   "SPYD": {
     "status": "below",
-    "current_yield": 4.08,
-    "price_usd": 47.91,
+    "current_yield": 4.12,
+    "price_usd": 47.54,
     "dividend_usd": 1.96,
     "threshold": 4.57,
-    "last_trade_date": "2026-03-02",
+    "last_trade_date": "2026-03-03",
     "last_year": 2026,
     "baseline": {
       "years": 10,
       "yield": 4.57
     },
-    "last_checked": "2026-03-03",
+    "last_checked": "2026-03-04",
     "last_notified": "2025-11-21",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -64,17 +64,17 @@
   },
   "SCHD": {
     "status": "below",
-    "current_yield": 3.29,
-    "price_usd": 31.86,
+    "current_yield": 3.31,
+    "price_usd": 31.59,
     "dividend_usd": 1.05,
     "threshold": 3.52,
-    "last_trade_date": "2026-03-02",
+    "last_trade_date": "2026-03-03",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.52
     },
-    "last_checked": "2026-03-03",
+    "last_checked": "2026-03-04",
     "last_notified": "2026-01-30",
     "last_reminded": null,
     "crossed_above_date": null,
