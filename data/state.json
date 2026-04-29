@@ -1,17 +1,17 @@
 {
   "VYM": {
     "status": "below",
-    "current_yield": 2.28,
-    "price_usd": 154.29,
+    "current_yield": 2.27,
+    "price_usd": 154.5,
     "dividend_usd": 3.51,
     "threshold": 3.0,
-    "last_trade_date": "2026-04-28",
+    "last_trade_date": "2026-04-29",
     "last_year": 2026,
     "baseline": {
       "years": 19,
       "yield": 3.0
     },
-    "last_checked": "2026-04-29",
+    "last_checked": "2026-04-30",
     "last_notified": "2025-12-22",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -21,39 +21,39 @@
     "last_reminded_price_jpy": null
   },
   "HDV": {
-    "status": "below",
-    "current_yield": 2.94,
-    "price_usd": 134.49,
+    "status": "above",
+    "current_yield": 14.65,
+    "price_usd": 27.02,
     "dividend_usd": 3.96,
     "threshold": 3.53,
-    "last_trade_date": "2026-04-28",
+    "last_trade_date": "2026-04-29",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.53
     },
-    "last_checked": "2026-04-29",
-    "last_notified": "2025-11-17",
-    "last_reminded": null,
-    "crossed_above_date": null,
-    "crossed_above_yield": null,
-    "crossed_above_price_jpy": null,
-    "last_reminded_yield": null,
-    "last_reminded_price_jpy": null
+    "last_checked": "2026-04-30",
+    "last_notified": "2026-04-30",
+    "last_reminded": "2026-04-30",
+    "crossed_above_date": "2026-04-30",
+    "crossed_above_yield": 14.65,
+    "crossed_above_price_jpy": 4332.0,
+    "last_reminded_yield": 14.65,
+    "last_reminded_price_jpy": 4332.0
   },
   "SPYD": {
     "status": "below",
     "current_yield": 4.29,
-    "price_usd": 46.36,
+    "price_usd": 46.29,
     "dividend_usd": 1.99,
     "threshold": 4.57,
-    "last_trade_date": "2026-04-28",
+    "last_trade_date": "2026-04-29",
     "last_year": 2026,
     "baseline": {
       "years": 10,
       "yield": 4.57
     },
-    "last_checked": "2026-04-29",
+    "last_checked": "2026-04-30",
     "last_notified": "2025-11-21",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -64,17 +64,17 @@
   },
   "SCHD": {
     "status": "below",
-    "current_yield": 3.37,
-    "price_usd": 31.31,
+    "current_yield": 3.35,
+    "price_usd": 31.45,
     "dividend_usd": 1.06,
     "threshold": 3.52,
-    "last_trade_date": "2026-04-28",
+    "last_trade_date": "2026-04-29",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.52
     },
-    "last_checked": "2026-04-29",
+    "last_checked": "2026-04-30",
     "last_notified": "2026-01-30",
     "last_reminded": null,
     "crossed_above_date": null,
