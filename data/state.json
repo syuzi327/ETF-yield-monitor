@@ -1,17 +1,17 @@
 {
   "VYM": {
     "status": "below",
-    "current_yield": 2.19,
-    "price_usd": 166.14,
+    "current_yield": 2.18,
+    "price_usd": 166.67,
     "dividend_usd": 3.63,
     "threshold": 3.0,
-    "last_trade_date": "2026-08-11",
+    "last_trade_date": "2026-08-12",
     "last_year": 2026,
     "baseline": {
       "years": 19,
       "yield": 3.0
     },
-    "last_checked": "2026-08-12",
+    "last_checked": "2026-08-13",
     "last_notified": "2025-12-22",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -26,13 +26,13 @@
     "price_usd": 29.07,
     "dividend_usd": 0.69,
     "threshold": 3.53,
-    "last_trade_date": "2026-08-11",
+    "last_trade_date": "2026-08-12",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.53
     },
-    "last_checked": "2026-08-12",
+    "last_checked": "2026-08-13",
     "last_notified": "2026-05-01",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -43,17 +43,17 @@
   },
   "SPYD": {
     "status": "below",
-    "current_yield": 4.07,
-    "price_usd": 49.85,
+    "current_yield": 4.08,
+    "price_usd": 49.8,
     "dividend_usd": 2.03,
     "threshold": 4.57,
-    "last_trade_date": "2026-08-11",
+    "last_trade_date": "2026-08-12",
     "last_year": 2026,
     "baseline": {
       "years": 10,
       "yield": 4.57
     },
-    "last_checked": "2026-08-12",
+    "last_checked": "2026-08-13",
     "last_notified": "2025-11-21",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -65,16 +65,16 @@
   "SCHD": {
     "status": "below",
     "current_yield": 3.06,
-    "price_usd": 34.27,
+    "price_usd": 34.26,
     "dividend_usd": 1.05,
     "threshold": 3.52,
-    "last_trade_date": "2026-08-11",
+    "last_trade_date": "2026-08-12",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.52
     },
-    "last_checked": "2026-08-12",
+    "last_checked": "2026-08-13",
     "last_notified": "2026-01-30",
     "last_reminded": null,
     "crossed_above_date": null,
