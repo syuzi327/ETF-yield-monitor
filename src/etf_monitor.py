@@ -112,12 +112,16 @@ def get_etf_data(ticker):
         try:
             dividends = etf.dividends
             if not dividends.empty:
-                # 400日ウィンドウで取得して直近4回分に絞る
-                # （365日境界で四半期配当が脱落する誤検知を防ぐ）
-                four_hundred_days_ago = history.index[-1] - timedelta(days=400)
-                recent_dividends = dividends[dividends.index > four_hundred_days_ago]
-                if len(recent_dividends) > 4:
-                    recent_dividends = recent_dividends.iloc[-4:]
+                # 直近の配当日を起点に345日以内の配当を合算する
+                # - 回数で区切らないため、月次/四半期/半年など分配頻度に依存しない
+                #   （HDVは2026年7月に四半期→月次へ変更）
+                # - 365日でなく345日にするのは、1年前の同じ回の配当日ずれによる二重計上を防ぐため
+                latest_div_date = dividends.index[-1]
+                if latest_div_date < history.index[-1] - timedelta(days=400):
+                    recent_dividends = dividends.iloc[0:0]  # 1年以上配当なし
+                else:
+                    window_start = latest_div_date - timedelta(days=345)
+                    recent_dividends = dividends[dividends.index > window_start]
                 annual_dividend = recent_dividends.sum()
                 dividend_yield = (annual_dividend / current_price) * 100
             else:
