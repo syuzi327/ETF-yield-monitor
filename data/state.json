@@ -1,17 +1,17 @@
 {
   "VYM": {
     "status": "below",
-    "current_yield": NaN,
-    "price_usd": NaN,
+    "current_yield": 2.23,
+    "price_usd": 164.92,
     "dividend_usd": 3.68,
     "threshold": 3.0,
-    "last_trade_date": "2026-11-12",
+    "last_trade_date": "2026-11-13",
     "last_year": 2026,
     "baseline": {
       "years": 19,
       "yield": 3.0
     },
-    "last_checked": "2026-11-13",
+    "last_checked": "2026-11-14",
     "last_notified": "2025-12-22",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -22,17 +22,17 @@
   },
   "HDV": {
     "status": "below",
-    "current_yield": NaN,
-    "price_usd": NaN,
+    "current_yield": 3.09,
+    "price_usd": 30.98,
     "dividend_usd": 0.96,
     "threshold": 3.53,
-    "last_trade_date": "2026-11-12",
+    "last_trade_date": "2026-11-13",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.53
     },
-    "last_checked": "2026-11-13",
+    "last_checked": "2026-11-14",
     "last_notified": "2026-05-01",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -47,13 +47,13 @@
     "price_usd": NaN,
     "dividend_usd": 2.06,
     "threshold": 4.57,
-    "last_trade_date": "2026-11-12",
+    "last_trade_date": "2026-11-13",
     "last_year": 2026,
     "baseline": {
       "years": 10,
       "yield": 4.57
     },
-    "last_checked": "2026-11-13",
+    "last_checked": "2026-11-14",
     "last_notified": "2025-11-21",
     "last_reminded": null,
     "crossed_above_date": null,
@@ -64,17 +64,17 @@
   },
   "SCHD": {
     "status": "below",
-    "current_yield": NaN,
-    "price_usd": NaN,
+    "current_yield": 2.92,
+    "price_usd": 36.12,
     "dividend_usd": 1.06,
     "threshold": 3.52,
-    "last_trade_date": "2026-11-12",
+    "last_trade_date": "2026-11-13",
     "last_year": 2026,
     "baseline": {
       "years": 15,
       "yield": 3.52
     },
-    "last_checked": "2026-11-13",
+    "last_checked": "2026-11-14",
     "last_notified": "2026-01-30",
     "last_reminded": null,
     "crossed_above_date": null,
